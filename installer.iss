@@ -1,7 +1,7 @@
 [Setup]
 AppId={{8F9A2C41-5E3B-4A91-9D12-C78123456789}
 AppName=App quét CCCD cho Nger ❤️
-AppVersion=2026.11.09.0659
+AppVersion=2026.11.10.0054
 AppPublisher=Internal HR Tool
 DefaultDirName={autopf}\CCCDScanner
 DisableDirPage=no

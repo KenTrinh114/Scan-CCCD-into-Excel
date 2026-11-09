@@ -5,6 +5,7 @@ import gc
 import os
 from pathlib import Path
 import queue
+import shutil
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -24,6 +25,14 @@ from src.excel_exporter import append_records_to_excel, export_records_to_excel
 from src.parser import build_record
 from src.qr_engine import CCCDQRScanner
 from src.version import APP_VERSION, BUILD_TIME
+from src.failed_handler import (
+    HoverPreview,
+    make_preview,
+    move_failed,
+    open_path,
+    restore_moved,
+    safe_name,
+)
 
 # Extended supported image extensions including Apple iPhone/iPad HEIC/HEIF
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic", ".heif"}
@@ -196,6 +205,17 @@ class CCCDScannerApp:
         self.spinner_running: bool = False
         self.spinner_frame_idx: int = 0
         self.SPINNER_FRAMES = ["◐", "◓", "◑", "◒"]
+
+        # Split mode & failed image handling states
+        self.is_split_mode: bool = False
+        self.has_moved_failed_images: bool = False
+        self.last_failed_move_dest: Path | None = None
+        self.last_failed_move_items: dict[str, str] = {}
+        self.last_failed_move_names: dict[str, str] = {}
+        self.passed_item_to_rec_idx: dict[str, int] = {}
+        self.failed_item_to_rec_idx: dict[str, int] = {}
+        self.last_input_dir: str | None = None
+        self.last_moved_log_path: str | None = None
 
         # Build UI layout
         self._build_top_toolbar()
@@ -665,6 +685,43 @@ class CCCDScannerApp:
             self.col_tree.tag_configure("even_row", background=t["tree_even"], foreground=t["tree_fg"])
             self.col_tree.tag_configure("odd_row", background=t["tree_odd"], foreground=t["tree_fg"])
 
+        # Split view widgets
+        if hasattr(self, "right_header_bar"):
+            self.right_header_bar.configure(bg=t["frame_bg"])
+        if hasattr(self, "hdr_passed"):
+            self.hdr_passed.configure(bg=t["frame_bg"])
+        if hasattr(self, "lbl_passed_title"):
+            self.lbl_passed_title.configure(bg=t["frame_bg"], fg=t["success_fg"])
+        if hasattr(self, "lbl_passed_hint"):
+            self.lbl_passed_hint.configure(bg=t["frame_bg"], fg=t["text_muted"])
+        if hasattr(self, "hdr_failed"):
+            self.hdr_failed.configure(bg=t["frame_bg"])
+        if hasattr(self, "lbl_failed_title"):
+            self.lbl_failed_title.configure(bg=t["frame_bg"], fg=t["err_fg"])
+        if hasattr(self, "lbl_failed_hint"):
+            self.lbl_failed_hint.configure(bg=t["frame_bg"], fg=t["text_muted"])
+        if hasattr(self, "failed_toolbar"):
+            self.failed_toolbar.configure(bg=t["frame_bg"])
+        if hasattr(self, "lbl_move_status"):
+            self.lbl_move_status.configure(bg=t["frame_bg"], fg=t["text_muted"])
+        if hasattr(self, "lbl_failed_empty"):
+            self.lbl_failed_empty.configure(
+                bg=t["badge_bg"],
+                fg=t["text_main"],
+                highlightbackground=t["border_col"],
+                highlightthickness=1,
+            )
+
+        if hasattr(self, "tree_passed"):
+            self.tree_passed.tag_configure("success_row", foreground=t["success_fg"])
+            self.tree_passed.tag_configure("even_row", background=t["tree_even"], foreground=t["tree_fg"])
+            self.tree_passed.tag_configure("odd_row", background=t["tree_odd"], foreground=t["tree_fg"])
+
+        if hasattr(self, "tree_failed"):
+            self.tree_failed.tag_configure("error_row", foreground=t["err_fg"])
+            self.tree_failed.tag_configure("even_row", background=t["tree_even"], foreground=t["tree_fg"])
+            self.tree_failed.tag_configure("odd_row", background=t["tree_odd"], foreground=t["tree_fg"])
+
     # =========================================================================
     # UI Layout Construction
     # =========================================================================
@@ -724,6 +781,7 @@ class CCCDScannerApp:
         )
         btn_clear.pack(side=tk.LEFT, padx=(0, 8))
 
+        # Retained for internal backwards-compatibility with existing tests, but omitted from UI
         self.filter_error_var = tk.BooleanVar(value=False)
         self.chk_filter = ttk.Checkbutton(
             self.top_toolbar,
@@ -731,7 +789,14 @@ class CCCDScannerApp:
             variable=self.filter_error_var,
             command=self._refresh_preview_table_data,
         )
-        self.chk_filter.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.btn_split_toggle = ttk.Button(
+            self.top_toolbar,
+            text="⚡ Tách danh sách lỗi",
+            style="Small.TButton",
+            command=self._on_toggle_split_view,
+        )
+        self.btn_split_toggle.pack(side=tk.LEFT, padx=(0, 8))
 
         # Cluster 4 (Far Right): Theme Selection
         self.theme_container = tk.Frame(self.top_toolbar)
@@ -856,13 +921,24 @@ class CCCDScannerApp:
         )
         paned.add(self.right_frame, weight=4)
 
-        # Subtitle hint
+        # Subtitle header bar with hint & split toggle button
+        self.right_header_bar = tk.Frame(self.right_frame)
+        self.right_header_bar.pack(fill=tk.X, pady=(0, 4))
+
         self.lbl_right_hint = tk.Label(
-            self.right_frame,
+            self.right_header_bar,
             text="Nhấp đúp chuột vào ô bất kỳ để chỉnh sửa trực tiếp thông tin trước khi xuất Excel.",
             font=("Segoe UI", 8),
         )
-        self.lbl_right_hint.pack(anchor="w", pady=(0, 4))
+        self.lbl_right_hint.pack(side=tk.LEFT)
+
+        self.btn_split_sub = ttk.Button(
+            self.right_header_bar,
+            text="⚡ Tách danh sách lỗi",
+            style="Small.TButton",
+            command=self._on_toggle_split_view,
+        )
+        self.btn_split_sub.pack(side=tk.RIGHT)
 
         # Main Table Container
         self.table_container = ttk.Frame(self.right_frame)
@@ -893,6 +969,175 @@ class CCCDScannerApp:
 
         # Update button states on selection changes
         self.table.bind("<<TreeviewSelect>>", self._on_table_select_changed)
+
+        # ---------------------------------------------------------------------
+        # Split View Container (Passed / Failed split lists)
+        # ---------------------------------------------------------------------
+        self.split_container = ttk.Frame(self.right_frame)
+
+        self.split_paned = ttk.PanedWindow(self.split_container, orient=tk.VERTICAL)
+        self.split_paned.pack(fill=tk.BOTH, expand=True)
+
+        # Top Section: Passed List
+        self.frame_passed = ttk.Frame(self.split_paned)
+        self.split_paned.add(self.frame_passed, weight=1)
+
+        self.hdr_passed = tk.Frame(self.frame_passed)
+        self.hdr_passed.pack(fill=tk.X, pady=(0, 3))
+
+        self.lbl_passed_title = tk.Label(
+            self.hdr_passed,
+            text="✅ Danh sách Đạt (0)",
+            font=("Segoe UI", 9, "bold"),
+        )
+        self.lbl_passed_title.pack(side=tk.LEFT)
+
+        self.lbl_passed_hint = tk.Label(
+            self.hdr_passed,
+            text="— Thẻ CCCD quét thành công, sẵn sàng xuất Excel",
+            font=("Segoe UI", 8),
+        )
+        self.lbl_passed_hint.pack(side=tk.LEFT, padx=(4, 0))
+
+        tree_passed_container = ttk.Frame(self.frame_passed)
+        tree_passed_container.pack(fill=tk.BOTH, expand=True)
+
+        self.tree_passed = ttk.Treeview(
+            tree_passed_container,
+            columns=("n", "file", "name", "cccd", "dob", "status"),
+            show="headings",
+            selectmode="extended",
+        )
+        self.tree_passed.heading("n", text="#")
+        self.tree_passed.column("n", width=40, anchor="center")
+        self.tree_passed.heading("file", text="Tên file ảnh")
+        self.tree_passed.column("file", width=160, anchor="w")
+        self.tree_passed.heading("name", text="Họ và tên")
+        self.tree_passed.column("name", width=180, anchor="w")
+        self.tree_passed.heading("cccd", text="Số định danh / CCCD")
+        self.tree_passed.column("cccd", width=130, anchor="center")
+        self.tree_passed.heading("dob", text="Ngày sinh")
+        self.tree_passed.column("dob", width=90, anchor="center")
+        self.tree_passed.heading("status", text="Trạng thái")
+        self.tree_passed.column("status", width=120, anchor="w")
+
+        self.tree_passed_scroll_y = ttk.Scrollbar(tree_passed_container, orient=tk.VERTICAL, command=self.tree_passed.yview)
+        self.tree_passed_scroll_x = ttk.Scrollbar(tree_passed_container, orient=tk.HORIZONTAL, command=self.tree_passed.xview)
+        self.tree_passed.configure(yscrollcommand=self.tree_passed_scroll_y.set, xscrollcommand=self.tree_passed_scroll_x.set)
+
+        self.tree_passed.grid(row=0, column=0, sticky="nsew")
+        self.tree_passed_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.tree_passed_scroll_x.grid(row=1, column=0, sticky="ew")
+        tree_passed_container.grid_rowconfigure(0, weight=1)
+        tree_passed_container.grid_columnconfigure(0, weight=1)
+
+        self.tree_passed.bind("<Double-Button-1>", self._on_split_passed_double_click)
+        self.tree_passed.bind("<Delete>", self._on_split_passed_delete)
+        self.tree_passed.bind("<BackSpace>", self._on_split_passed_delete)
+
+        # Bottom Section: Failed List
+        self.frame_failed = ttk.Frame(self.split_paned)
+        self.split_paned.add(self.frame_failed, weight=1)
+
+        self.hdr_failed = tk.Frame(self.frame_failed)
+        self.hdr_failed.pack(fill=tk.X, pady=(5, 3))
+
+        self.lbl_failed_title = tk.Label(
+            self.hdr_failed,
+            text="❌ Danh sách Cần chụp lại (0)",
+            font=("Segoe UI", 9, "bold"),
+        )
+        self.lbl_failed_title.pack(side=tk.LEFT)
+
+        self.lbl_failed_hint = tk.Label(
+            self.hdr_failed,
+            text="— 💡 Rê chuột để xem ảnh • Nhấp đúp ô Tên để sửa • Nhấp đúp dòng để mở ảnh",
+            font=("Segoe UI", 8),
+        )
+        self.lbl_failed_hint.pack(side=tk.LEFT, padx=(4, 0))
+
+        tree_failed_container = ttk.Frame(self.frame_failed)
+        tree_failed_container.pack(fill=tk.BOTH, expand=True)
+
+        self.tree_failed = ttk.Treeview(
+            tree_failed_container,
+            columns=("n", "file", "name", "status"),
+            show="headings",
+            selectmode="extended",
+        )
+        self.tree_failed.heading("n", text="#")
+        self.tree_failed.column("n", width=45, anchor="center")
+        self.tree_failed.heading("file", text="Tên file ảnh")
+        self.tree_failed.column("file", width=180, anchor="w")
+        self.tree_failed.heading("name", text="Họ và tên (chủ thẻ)")
+        self.tree_failed.column("name", width=220, anchor="w")
+        self.tree_failed.heading("status", text="Trạng thái lỗi (cần chụp lại)")
+        self.tree_failed.column("status", width=360, anchor="w")
+
+        self.tree_failed_scroll_y = ttk.Scrollbar(tree_failed_container, orient=tk.VERTICAL, command=self.tree_failed.yview)
+        self.tree_failed_scroll_x = ttk.Scrollbar(tree_failed_container, orient=tk.HORIZONTAL, command=self.tree_failed.xview)
+        self.tree_failed.configure(yscrollcommand=self.tree_failed_scroll_y.set, xscrollcommand=self.tree_failed_scroll_x.set)
+
+        self.tree_failed.grid(row=0, column=0, sticky="nsew")
+        self.tree_failed_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.tree_failed_scroll_x.grid(row=1, column=0, sticky="ew")
+        tree_failed_container.grid_rowconfigure(0, weight=1)
+        tree_failed_container.grid_columnconfigure(0, weight=1)
+
+        # Empty state overlay when failed images are moved
+        self.lbl_failed_empty = tk.Label(
+            tree_failed_container,
+            text="📂 Các ảnh lỗi đã được gom lại, bạn có thể hoàn tác để chúng hiện lại ở đây",
+            font=("Segoe UI", 9, "bold"),
+            padx=16,
+            pady=10,
+            relief="solid",
+            bd=1,
+        )
+
+        # Attach HoverPreview ONLY to the Failed treeview!
+        self.failed_hover_preview = HoverPreview(
+            self.tree_failed,
+            lambda row_id: self.records[self.failed_item_to_rec_idx[row_id]].get("_full_path")
+            if row_id in self.failed_item_to_rec_idx and self.failed_item_to_rec_idx[row_id] < len(self.records)
+            else None,
+        )
+
+        self.tree_failed.bind("<Double-Button-1>", self._on_split_failed_double_click)
+        self.tree_failed.bind("<Delete>", self._on_split_failed_delete)
+        self.tree_failed.bind("<BackSpace>", self._on_split_failed_delete)
+
+        # Action Toolbar below Failed table
+        self.failed_toolbar = tk.Frame(self.frame_failed, pady=4)
+        self.failed_toolbar.pack(fill=tk.X, pady=(4, 0))
+
+        # Merged Move/Undo button (2 states)
+        self.btn_move_toggle = ttk.Button(
+            self.failed_toolbar,
+            text="📁 Gom ảnh lỗi vào 1 thư mục",
+            style="Primary.TButton",
+            command=self._on_handle_failed_images_action,
+        )
+        self.btn_move_toggle.pack(side=tk.LEFT, padx=(0, 8))
+
+        # Aliases for backwards compatibility with test suites
+        self.btn_move_failed = self.btn_move_toggle
+        self.btn_restore_failed = self.btn_move_toggle
+
+        self.lbl_move_status = tk.Label(
+            self.failed_toolbar,
+            text="",
+            font=("Segoe UI", 8),
+        )
+        self.lbl_move_status.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.btn_merge_back = ttk.Button(
+            self.failed_toolbar,
+            text="📋 Gộp lại danh sách chính",
+            style="Small.TButton",
+            command=self._on_toggle_split_view,
+        )
+        self.btn_merge_back.pack(side=tk.RIGHT)
 
         # Friendly Empty State Overlay
         self._build_empty_state_overlay()
@@ -966,6 +1211,9 @@ class CCCDScannerApp:
 
     def _check_empty_state(self) -> None:
         """Show or hide the empty state overlay depending on records count."""
+        if self.is_split_mode:
+            self.empty_frame.place_forget()
+            return
         if not self.records:
             self.empty_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
         else:
@@ -1443,11 +1691,14 @@ class CCCDScannerApp:
         )
         if files:
             paths = [Path(f) for f in files if Path(f).suffix.lower() in SUPPORTED_EXTENSIONS]
+            if paths:
+                self.last_input_dir = str(paths[0].parent)
             self._start_scanning(paths)
 
     def _on_add_directory(self) -> None:
         folder = filedialog.askdirectory(title="Chọn thư mục chứa ảnh CCCD")
         if folder:
+            self.last_input_dir = str(folder)
             dir_path = Path(folder)
             paths = [
                 p
@@ -1509,6 +1760,23 @@ class CCCDScannerApp:
             self.task_queue.put((1, task_id, p, "FAST"))
 
         self._adjust_all_column_widths(new_pending_recs)
+        self.has_moved_failed_images = False
+        self.last_failed_move_dest = None
+        self.last_failed_move_items.clear()
+        self.last_failed_move_names.clear()
+        if hasattr(self, "lbl_failed_empty"):
+            self.lbl_failed_empty.place_forget()
+        if hasattr(self, "btn_move_toggle"):
+            self.btn_move_toggle.config(
+                text="📁 Gom ảnh lỗi vào 1 thư mục",
+                style="Primary.TButton",
+            )
+            self.btn_move_toggle.state(["disabled"])
+        if hasattr(self, "lbl_move_status"):
+            self.lbl_move_status.config(text="")
+
+        if self.is_split_mode:
+            self._refresh_split_views()
         self._check_empty_state()
         self._update_status_bar()
         self._start_spinner()
@@ -1665,6 +1933,8 @@ class CCCDScannerApp:
             if batch_records:
                 # Dynamically auto-fit column widths across all column types once per batch tick
                 self._adjust_all_column_widths(batch_records)
+                if self.is_split_mode:
+                    self._refresh_split_views()
 
             self._check_empty_state()
             self._update_status_bar()
@@ -1710,6 +1980,8 @@ class CCCDScannerApp:
 
         # Re-render preview table & status bar
         self._refresh_preview_table_data()
+        if self.is_split_mode:
+            self._refresh_split_views()
         self._update_status_bar()
         self._check_empty_state()
 
@@ -1935,6 +2207,23 @@ class CCCDScannerApp:
                 self.table.column(key, width=base_w, minwidth=60, stretch=False)
             except Exception:
                 pass
+        self.has_moved_failed_images = False
+        self.last_failed_move_dest = None
+        self.last_failed_move_items.clear()
+        self.last_failed_move_names.clear()
+        if hasattr(self, "lbl_failed_empty"):
+            self.lbl_failed_empty.place_forget()
+        if hasattr(self, "btn_move_toggle"):
+            self.btn_move_toggle.config(
+                text="📁 Gom ảnh lỗi vào 1 thư mục",
+                style="Primary.TButton",
+            )
+            self.btn_move_toggle.state(["disabled"])
+        if hasattr(self, "lbl_move_status"):
+            self.lbl_move_status.config(text="")
+
+        if self.is_split_mode:
+            self._refresh_split_views()
         self._check_empty_state()
         self._update_status_bar()
 
@@ -2073,6 +2362,496 @@ class CCCDScannerApp:
                 f"Không thể ghi tiếp vào file Excel do sự cố:\n{e}\n\n"
                 "Gợi ý: Kiểm tra xem file có đang bị mở trong phần mềm khác hay không.",
             )
+
+    # =========================================================================
+    # Split View (Passed / Failed) & Failed Image Handling
+    # =========================================================================
+    def _on_toggle_split_view(self) -> None:
+        """Toggle between the standard single preview table and the split Passed/Failed views."""
+        self.is_split_mode = not self.is_split_mode
+        if self.is_split_mode:
+            self.table_container.pack_forget()
+            self.split_container.pack(fill=tk.BOTH, expand=True)
+            self.btn_split_toggle.config(text="📋 Gộp lại danh sách chính")
+            if hasattr(self, "btn_split_sub"):
+                self.btn_split_sub.config(text="📋 Gộp lại danh sách chính")
+            self._refresh_split_views()
+        else:
+            self.split_container.pack_forget()
+            self.table_container.pack(fill=tk.BOTH, expand=True)
+            self.btn_split_toggle.config(text="⚡ Tách danh sách lỗi")
+            if hasattr(self, "btn_split_sub"):
+                self.btn_split_sub.config(text="⚡ Tách danh sách lỗi")
+            self._refresh_preview_table_data()
+        self._check_empty_state()
+
+    def _refresh_split_views(self) -> None:
+        """Populate both Passed and Failed tables from self.records."""
+        if not hasattr(self, "tree_passed") or not hasattr(self, "tree_failed"):
+            return
+
+        self._destroy_inline_entry()
+        for item in self.tree_passed.get_children():
+            self.tree_passed.delete(item)
+        for item in self.tree_failed.get_children():
+            self.tree_failed.delete(item)
+
+        self.passed_item_to_rec_idx.clear()
+        self.failed_item_to_rec_idx.clear()
+
+        pn = 0
+        fn = 0
+        for rec_idx, rec in enumerate(self.records):
+            is_err = rec.get("_is_error", False)
+            is_pending = rec.get("_is_pending", False)
+
+            if is_err:
+                if rec.get("_is_moved_to_error_folder", False):
+                    continue
+                fn += 1
+                num_str = f"{fn:03d}"
+                fname = rec.get("source_file", "")
+                name_val = rec.get("full_name", "") or "(chưa nhập tên)"
+                status_val = rec.get("status", "")
+
+                parity_tag = "even_row" if fn % 2 == 0 else "odd_row"
+                item_id = self.tree_failed.insert(
+                    "",
+                    tk.END,
+                    values=(num_str, fname, name_val, status_val),
+                    tags=("error_row", parity_tag),
+                )
+                self.failed_item_to_rec_idx[item_id] = rec_idx
+            elif not is_pending:
+                pn += 1
+                num_str = f"{pn:03d}"
+                fname = rec.get("source_file", "")
+                name_val = rec.get("full_name", "")
+                cccd_val = rec.get("cccd_number", "")
+                dob_val = rec.get("dob", "")
+                status_val = rec.get("status", "")
+
+                parity_tag = "even_row" if pn % 2 == 0 else "odd_row"
+                item_id = self.tree_passed.insert(
+                    "",
+                    tk.END,
+                    values=(num_str, fname, name_val, cccd_val, dob_val, status_val),
+                    tags=("success_row", parity_tag),
+                )
+                self.passed_item_to_rec_idx[item_id] = rec_idx
+
+        if hasattr(self, "lbl_failed_empty"):
+            if self.has_moved_failed_images and fn == 0:
+                self.lbl_failed_empty.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+            else:
+                self.lbl_failed_empty.place_forget()
+
+        if hasattr(self, "lbl_passed_title"):
+            self.lbl_passed_title.config(text=f"✅ Danh sách Đạt ({pn} thẻ thành công)")
+        if hasattr(self, "lbl_failed_title"):
+            if self.has_moved_failed_images and fn == 0:
+                self.lbl_failed_title.config(text="❌ Danh sách Cần chụp lại (Đã gom vào thư mục 'Ảnh lỗi')")
+            else:
+                self.lbl_failed_title.config(text=f"❌ Danh sách Cần chụp lại ({fn} ảnh lỗi)")
+
+        if hasattr(self, "btn_move_toggle"):
+            if self.has_moved_failed_images:
+                self.btn_move_toggle.config(
+                    text="↩ Hoàn tác gom ảnh",
+                    style="SmallDanger.TButton",
+                )
+                self.btn_move_toggle.state(["!disabled"])
+            else:
+                self.btn_move_toggle.config(
+                    text="📁 Gom ảnh lỗi vào 1 thư mục",
+                    style="Primary.TButton",
+                )
+                if fn > 0:
+                    self.btn_move_toggle.state(["!disabled"])
+                else:
+                    self.btn_move_toggle.state(["disabled"])
+
+    def _on_split_failed_double_click(self, event: tk.Event) -> None:
+        """Handle double clicks on the Failed list: column #3 edits Name, other columns open the full image."""
+        self._destroy_inline_entry()
+
+        item_id = self.tree_failed.identify_row(event.y)
+        col_id = self.tree_failed.identify_column(event.x)
+        if not item_id or not col_id:
+            return
+
+        rec_idx = self.failed_item_to_rec_idx.get(item_id)
+        if rec_idx is None or rec_idx >= len(self.records):
+            return
+
+        rec = self.records[rec_idx]
+
+        # Column "#3" is "full_name" (Họ và tên)
+        if col_id == "#3":
+            bbox = self.tree_failed.bbox(item_id, col_id)
+            if not bbox:
+                return
+            x, y, width, height = bbox
+            current_val = rec.get("full_name", "")
+
+            t = THEMES[self.current_theme]
+            entry = tk.Entry(
+                self.tree_failed,
+                font=("Segoe UI", 10),
+                bg=t["entry_bg"],
+                fg=t["entry_fg"],
+                insertbackground=t["entry_caret"],
+                relief="solid",
+                bd=1,
+                highlightcolor=t["accent_bg"],
+                highlightthickness=1,
+            )
+            entry.insert(0, current_val)
+            entry.select_range(0, tk.END)
+            entry.place(x=x, y=y, width=width, height=height)
+            entry.focus_set()
+            self.active_inline_entry = entry
+
+            def commit_edit(e: Any = None) -> None:
+                if self.active_inline_entry is None:
+                    return
+                new_val = entry.get().strip()
+                self._destroy_inline_entry()
+                rec["full_name"] = new_val
+                current_vals = list(self.tree_failed.item(item_id, "values"))
+                current_vals[2] = new_val if new_val else "(chưa nhập tên)"
+                self.tree_failed.item(item_id, values=current_vals)
+
+            def cancel_edit(e: Any = None) -> None:
+                self._destroy_inline_entry()
+
+            entry.bind("<Return>", commit_edit)
+            entry.bind("<FocusOut>", commit_edit)
+            entry.bind("<Escape>", cancel_edit)
+        else:
+            # Double-click any other column opens the full image file
+            path = rec.get("_full_path", "")
+            if path and os.path.exists(path):
+                try:
+                    open_path(path)
+                except Exception as e:
+                    messagebox.showerror("Lỗi mở ảnh", f"Không mở được tệp ảnh:\n{e}")
+            else:
+                messagebox.showwarning("Thông báo", f"Không tìm thấy file ảnh gốc:\n{path}")
+
+    def _on_split_passed_double_click(self, event: tk.Event) -> None:
+        """Handle double clicks on the Passed list: edit Name on column #3, open file on column #2."""
+        self._destroy_inline_entry()
+
+        item_id = self.tree_passed.identify_row(event.y)
+        col_id = self.tree_passed.identify_column(event.x)
+        if not item_id or not col_id:
+            return
+
+        rec_idx = self.passed_item_to_rec_idx.get(item_id)
+        if rec_idx is None or rec_idx >= len(self.records):
+            return
+
+        rec = self.records[rec_idx]
+
+        if col_id == "#3":
+            bbox = self.tree_passed.bbox(item_id, col_id)
+            if not bbox:
+                return
+            x, y, width, height = bbox
+            current_val = rec.get("full_name", "")
+
+            t = THEMES[self.current_theme]
+            entry = tk.Entry(
+                self.tree_passed,
+                font=("Segoe UI", 10),
+                bg=t["entry_bg"],
+                fg=t["entry_fg"],
+                insertbackground=t["entry_caret"],
+                relief="solid",
+                bd=1,
+                highlightcolor=t["accent_bg"],
+                highlightthickness=1,
+            )
+            entry.insert(0, current_val)
+            entry.select_range(0, tk.END)
+            entry.place(x=x, y=y, width=width, height=height)
+            entry.focus_set()
+            self.active_inline_entry = entry
+
+            def commit_edit(e: Any = None) -> None:
+                if self.active_inline_entry is None:
+                    return
+                new_val = entry.get().strip()
+                self._destroy_inline_entry()
+                rec["full_name"] = new_val
+                current_vals = list(self.tree_passed.item(item_id, "values"))
+                current_vals[2] = new_val
+                self.tree_passed.item(item_id, values=current_vals)
+
+            def cancel_edit(e: Any = None) -> None:
+                self._destroy_inline_entry()
+
+            entry.bind("<Return>", commit_edit)
+            entry.bind("<FocusOut>", commit_edit)
+            entry.bind("<Escape>", cancel_edit)
+        elif col_id == "#2":
+            path = rec.get("_full_path", "")
+            if path and os.path.exists(path):
+                try:
+                    open_path(path)
+                except Exception as e:
+                    messagebox.showerror("Lỗi mở ảnh", f"Không mở được tệp ảnh:\n{e}")
+
+    def _on_split_failed_delete(self, event: Any = None) -> None:
+        sel = self.tree_failed.selection()
+        if not sel:
+            return
+        indices = {
+            self.failed_item_to_rec_idx[item_id]
+            for item_id in sel
+            if item_id in self.failed_item_to_rec_idx
+        }
+        self._delete_records_by_indices(indices)
+
+    def _on_split_passed_delete(self, event: Any = None) -> None:
+        sel = self.tree_passed.selection()
+        if not sel:
+            return
+        indices = {
+            self.passed_item_to_rec_idx[item_id]
+            for item_id in sel
+            if item_id in self.passed_item_to_rec_idx
+        }
+        self._delete_records_by_indices(indices)
+
+    def _on_handle_failed_images_action(self) -> None:
+        """Single merged button handler: toggles between moving to 'Ảnh lỗi' and undoing."""
+        if self.has_moved_failed_images:
+            self._on_undo_move_failed_images()
+        else:
+            self._on_move_failed_images()
+
+    def _on_move_failed_images(self) -> None:
+        if self.is_scanning:
+            messagebox.showwarning(
+                "Đang quét ảnh",
+                "Phần mềm đang xử lý danh sách ảnh. Vui lòng chờ quét xong trước khi gom ảnh lỗi.",
+            )
+            return
+
+        failed_recs = [
+            rec
+            for rec in self.records
+            if rec.get("_is_error", False)
+            and not rec.get("_is_moved_to_error_folder", False)
+            and rec.get("_full_path")
+        ]
+
+        if not failed_recs:
+            messagebox.showinfo("Thông báo", "Không có ảnh lỗi nào trong danh sách cần gom.")
+            return
+
+        items = [(rec.get("_full_path", ""), rec.get("full_name", "")) for rec in failed_recs]
+
+        # Automatically locate parent directory and create "Ảnh lỗi" subfolder
+        first_path = Path(items[0][0])
+        base_dir = (
+            Path(self.last_input_dir)
+            if self.last_input_dir and Path(self.last_input_dir).is_dir()
+            else first_path.parent
+        )
+        dest_dir = base_dir / "Ảnh lỗi"
+
+        if hasattr(self, "btn_move_toggle"):
+            self.btn_move_toggle.state(["disabled"])
+        if hasattr(self, "lbl_move_status"):
+            self.lbl_move_status.config(text=f"Đang gom 0/{len(items)} ảnh lỗi vào thư mục...")
+
+        move_queue = queue.Queue()
+
+        def poll_move_queue():
+            finished = False
+            try:
+                while True:
+                    msg_type, data = move_queue.get_nowait()
+                    if msg_type == "progress":
+                        cur, tot = data
+                        self._update_move_progress(cur, tot)
+                    elif msg_type == "done":
+                        dest, moved, errors = data
+                        self._after_move_failed(dest, moved, errors, failed_recs)
+                        finished = True
+                        break
+            except queue.Empty:
+                pass
+
+            if not finished:
+                self.root.after(40, poll_move_queue)
+
+        def work():
+            try:
+                dest, moved, errors = move_failed(
+                    items,
+                    dest_dir,
+                    folder_name="Ảnh lỗi",
+                    progress=lambda i, total: move_queue.put(("progress", (i, total))),
+                )
+                move_queue.put(("done", (dest, moved, errors)))
+            except Exception as e:
+                move_queue.put(("done", (dest_dir, {}, [("", str(e))])))
+
+        self.root.after(40, poll_move_queue)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_move_progress(self, current: int, total: int) -> None:
+        if hasattr(self, "lbl_move_status"):
+            self.lbl_move_status.config(text=f"Đang gom {current}/{total}...")
+
+    def _after_move_failed(
+        self,
+        dest: Path,
+        moved: dict[str, str],
+        errors: list[tuple[str, str]],
+        failed_recs: list[dict[str, Any]] | None = None,
+    ) -> None:
+        if failed_recs is None:
+            failed_recs = [
+                rec
+                for rec in self.records
+                if rec.get("_is_error", False) and rec.get("_full_path") in moved
+            ]
+
+        self.last_failed_move_dest = dest
+        self.last_failed_move_items = {new_p: old_p for old_p, new_p in moved.items()}
+        self.last_failed_move_names = {}
+
+        for rec in failed_recs:
+            old_p = rec.get("_full_path", "")
+            if old_p in moved:
+                new_p = moved[old_p]
+                rec["_orig_path_before_move"] = old_p
+                orig_name = rec.get("source_file", Path(old_p).name)
+                rec["_orig_name_before_move"] = orig_name
+                self.last_failed_move_names[old_p] = orig_name
+                rec["_full_path"] = new_p
+                rec["source_file"] = Path(new_p).name
+                rec["_is_moved_to_error_folder"] = True
+
+        self.has_moved_failed_images = True
+        self.last_moved_log_path = str(dest / "_moved_log.csv")
+
+        self._refresh_preview_table_data()
+        if self.is_split_mode:
+            self._refresh_split_views()
+
+        if hasattr(self, "btn_move_toggle"):
+            self.btn_move_toggle.config(
+                text="↩ Hoàn tác gom ảnh",
+                style="SmallDanger.TButton",
+            )
+            self.btn_move_toggle.state(["!disabled"])
+
+        dest_str = str(dest)
+        if hasattr(self, "lbl_move_status"):
+            self.lbl_move_status.config(text=f"Đã gom {len(moved)} ảnh vào: {dest_str}")
+
+        msg = (
+            f"Đã gom thành công {len(moved)} ảnh lỗi vào thư mục:\n{dest_str}\n\n"
+            "Danh sách ảnh lỗi đã được làm trống. Bạn có thể bấm nút 'Hoàn tác gom ảnh' bất cứ lúc nào để khôi phục lại."
+        )
+        if errors:
+            msg += f"\n\n{len(errors)} tệp không thể chuyển (đang mở ở chương trình khác hoặc bị khóa)."
+
+        messagebox.showinfo("Đã gom ảnh lỗi", msg)
+        try:
+            open_path(dest_str)
+        except Exception:
+            pass
+
+    def _on_undo_move_failed_images(self) -> None:
+        """One-click instant undo: moves images out of 'Ảnh lỗi' back to original folder, removes 'Ảnh lỗi' folder."""
+        dest = self.last_failed_move_dest
+        log_csv = self.last_moved_log_path
+        moved_pairs = getattr(self, "last_failed_move_items", {})
+
+        restored_count = 0
+        errors = []
+
+        # 1. Restore files back using stored mapping
+        for new_p, orig_p in list(moved_pairs.items()):
+            new_path = Path(new_p)
+            orig_path = Path(orig_p)
+            if new_path.exists():
+                try:
+                    orig_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(new_path), str(orig_path))
+                    restored_count += 1
+                except OSError as e:
+                    errors.append((new_p, str(e)))
+
+        # Fallback to log CSV if moved_pairs was empty for any reason
+        if restored_count == 0 and log_csv and Path(log_csv).exists():
+            restored_dict, errs = restore_moved(log_csv, delete_empty_folder=True)
+            restored_count = len(restored_dict)
+            errors.extend(errs)
+
+        # 2. Delete empty "Ảnh lỗi" folder and log
+        if dest and dest.exists():
+            log_file = dest / "_moved_log.csv"
+            if log_file.exists():
+                try:
+                    log_file.unlink()
+                except Exception:
+                    pass
+            try:
+                dest.rmdir()
+            except Exception:
+                pass
+
+        # 3. Restore records in self.records so they reappear in tree_failed
+        for rec in self.records:
+            if rec.get("_is_moved_to_error_folder", False):
+                orig_p = rec.get("_orig_path_before_move")
+                orig_name = rec.get("_orig_name_before_move")
+                if orig_p:
+                    rec["_full_path"] = orig_p
+                if orig_name:
+                    rec["source_file"] = orig_name
+                rec["_is_moved_to_error_folder"] = False
+
+        self.has_moved_failed_images = False
+        self.last_failed_move_dest = None
+        self.last_failed_move_items = {}
+        self.last_failed_move_names = {}
+
+        # 4. Refresh views
+        self._refresh_preview_table_data()
+        if self.is_split_mode:
+            self._refresh_split_views()
+
+        # 5. Switch button back to State 1
+        if hasattr(self, "btn_move_toggle"):
+            self.btn_move_toggle.config(
+                text="📁 Gom ảnh lỗi vào 1 thư mục",
+                style="Primary.TButton",
+            )
+            fn_count = sum(1 for r in self.records if r.get("_is_error", False))
+            if fn_count > 0:
+                self.btn_move_toggle.state(["!disabled"])
+            else:
+                self.btn_move_toggle.state(["disabled"])
+
+        if hasattr(self, "lbl_move_status"):
+            self.lbl_move_status.config(
+                text="Đã hoàn tác: Các ảnh lỗi đã được đưa trở lại thư mục gốc và xóa thư mục 'Ảnh lỗi'."
+            )
+
+        make_preview.cache_clear()
+
+    def _on_restore_failed_images(self) -> None:
+        """Alias for _on_undo_move_failed_images for compatibility with test suites."""
+        self._on_undo_move_failed_images()
 
 
 def launch_gui() -> None:

@@ -122,7 +122,44 @@ Nếu bạn muốn sửa lại họ tên, ngày cấp, hoặc bổ sung ghi chú
 
 ---
 
-### Bước 5: Tùy chỉnh cột dữ liệu xuất Excel (Bảng bên trái)
+### Bước 5: Xử lý ảnh lỗi & Chuyển ảnh cần chụp lại vào thư mục riêng (Tách danh sách)
+Khi quét hàng loạt ảnh, một số thẻ CCCD không thể đọc được mã QR do ảnh mờ, chói đèn flash, hoặc bị che góc. Tên file gốc thường vô nghĩa (`IMG_0412.jpg`), khiến người kiểm tra không biết **ai là người cần chụp lại**.
+
+Tính năng **"⚡ Tách danh sách (Đạt / Lỗi)"** giải quyết triệt để vấn đề này:
+
+1. **Bấm nút "⚡ Tách danh sách (Đạt / Lỗi)"**:
+   - Nằm ngay trên thanh công cụ trên cùng và phía trên bảng kết quả.
+   - Khi bấm vào, màn hình được chia thành 2 bảng chuyên biệt:
+     - **Bảng trên (✅ Đạt)**: Các thẻ CCCD quét thành công, sẵn sàng xuất Excel.
+     - **Bảng dưới (❌ Cần chụp lại)**: Các ảnh bị lỗi không quét được mã QR.
+
+2. **Rê chuột xem trước ảnh tức thì (Hover Preview)**:
+   - Chỉ cần **rê chuột vào bất kỳ dòng nào** trong bảng Cần chụp lại: Ảnh thẻ CCCD sẽ tự động hiện lên trong 150ms mà không cần click chuột hay mở cửa sổ riêng.
+   - Nhờ đó, bạn có thể đọc ngay được **Họ và tên in trên mặt thẻ** (chữ in hoa trên thẻ luôn đọc được bằng mắt người kể cả khi mã QR hỏng).
+
+3. **Gõ tên người cần chụp lại**:
+   - **Nhấp đúp chuột vào ô "Họ và tên"** của dòng lỗi: Ô nhập liệu sẽ hiện ra.
+   - Gõ họ tên chủ thẻ (ví dụ: `Nguyễn Văn A`) và nhấn **`Enter`**.
+   - *Mẹo*: Nếu cần xem ảnh to toàn màn hình, bạn chỉ cần **nhấp đúp chuột vào dòng ảnh** (ngoài ô họ tên) để mở ảnh trực tiếp bằng trình xem ảnh mặc định của Windows.
+
+4. **Chuyển ảnh lỗi vào thư mục ("📁 Chuyển ảnh lỗi vào thư mục...")**:
+   - Bấm nút này ở dưới bảng ảnh lỗi.
+   - Chọn nơi lưu (mặc định phần mềm sẽ chọn cùng thư mục ảnh gốc để chuyển file gần như tức thì).
+   - Phần mềm sẽ **di chuyển (move)** toàn bộ ảnh lỗi vào thư mục mới `CanChupLai_YYYYMMDD_HHMMSS`.
+   - Các file ảnh được tự động đánh số thứ tự và gắn tên người chụp lại rõ ràng:
+     - Thẻ đã nhập tên: `001_Nguyen Van A.jpg`
+     - Thẻ chưa nhập tên: `002_unnamed_IMG_0412.jpg`
+   - Ngay khi chuyển xong, thư mục sẽ tự động mở lên trong Windows File Explorer để bạn gửi ngay cho bộ phận chụp lại ảnh!
+
+5. **An toàn tuyệt đối với Nhật ký & Nút Hoàn tác ("↩ Hoàn tác chuyển...")**:
+   - Một file nhật ký `_moved_log.csv` được tự động ghi lại.
+   - Bất cứ khi nào bạn muốn chuyển các file ảnh trở về vị trí ban đầu, chỉ cần bấm nút **"↩ Hoàn tác chuyển..."**.
+
+6. **Gộp lại danh sách chính**: Bấm nút **"📋 Gộp lại danh sách chính"** bất cứ lúc nào để quay lại bảng hiển thị chung. Các họ tên bạn đã nhập sẽ được đồng bộ đầy đủ!
+
+---
+
+### Bước 6: Tùy chỉnh cột dữ liệu xuất Excel (Bảng bên trái)
 Bạn hoàn toàn có thể quyết định file Excel của mình có những thông tin nào:
 1. **Chọn cột cần xuất**:
    - Nhấp chuột trực tiếp vào ô vuông checkbox ở cột **"Chọn"** (cột có biểu tượng ☑).
@@ -136,7 +173,7 @@ Bạn hoàn toàn có thể quyết định file Excel của mình có những t
 
 ---
 
-### Bước 6: Xuất dữ liệu ra file Excel
+### Bước 7: Xuất dữ liệu ra file Excel
 Phần mềm cung cấp 2 chế độ xuất linh hoạt ở góc dưới bên phải:
 
 #### 1. "📊 Xuất Excel mới"
@@ -157,7 +194,7 @@ Phần mềm cung cấp 2 chế độ xuất linh hoạt ở góc dưới bên p
 
 ---
 
-### Bước 7: Đổi giao diện Sáng / Tối
+### Bước 8: Đổi giao diện Sáng / Tối
 - Ở góc trên cùng bên phải thanh công cụ có mục chọn giao diện:
   - **☀️ Sáng**: Giao diện sáng dịu mắt, thanh lịch, dễ nhìn trong văn phòng làm việc.
   - **🌙 Tối**: Giao diện nền tối Obsidian hiện đại, êm dịu cho mắt khi làm việc buổi tối.
