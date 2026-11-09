@@ -1,0 +1,75 @@
+================================================================================
+           HƯỚNG DẪN CÀI ĐẶT VÀ SỬ DỤNG - APP QUÉT CCCD CHO NGER ❤️
+================================================================================
+
+PHẦN 1: HƯỚNG DẪN GIẢI NÉN VÀ CÀI ĐẶT
+--------------------------------------------------------------------------------
+1. GIẢI NÉN FILE:
+   - Sau khi nhận file "CCCD_Scanner_Setup.zip", nhấp chuột phải vào file.
+   - Chọn "Extract All..." (hoặc "Giải nén tất cả...").
+   - Bấm nút "Extract" để mở thư mục cài đặt.
+
+2. CHẠY FILE CÀI ĐẶT:
+   - Nhấp đúp chuột vào file: "CCCD_Scanner_Setup.exe".
+
+3. CÁCH VƯỢT QUA MÀN HÌNH XANH BẢO VỆ CỦA WINDOWS (SmartScreen):
+   (Do đây là phần mềm nội bộ viết riêng, Windows sẽ hiển thị cảnh báo bảo vệ).
+   - Khi hiện màn hình xanh "Windows protected your PC" (hoặc "Windows đã bảo vệ máy tính của bạn"):
+     + Bước 1: Nhấp vào dòng chữ gạch chân "More info" (hoặc "Thông tin bổ sung" / "Thêm thông tin").
+     + Bước 2: Bấm nút "Run anyway" (hoặc "Vẫn chạy") ở góc dưới.
+
+4. CÀI ĐẶT:
+   - Bấm "Next" -> "Next".
+   - Giữ nguyên tích chọn "Tạo biểu tượng ngoài màn hình chính (Desktop)" để có lối tắt tiện dụng.
+   - Bấm "Install", đợi vài giây rồi bấm "Finish".
+   - Ứng dụng sẽ tự động mở lên với biểu tượng chú heo ôm bảng tính Excel trên màn hình Desktop.
+
+
+PHẦN 2: HƯỚNG DẪN SỬ DỤNG PHẦN MỀM
+--------------------------------------------------------------------------------
+1. QUÉT THẺ CCCD TỪ ẢNH:
+   - Thêm từng ảnh hoặc nhiều ảnh lẻ: Bấm nút "📁 Thêm ảnh" (trên cùng hoặc giữa màn hình trống).
+   - Quét cả thư mục ảnh: Bấm nút "📂 Thêm thư mục ảnh" -> Chọn thư mục chứa ảnh CCCD, phần mềm sẽ tự động quét toàn bộ.
+   - Hỗ trợ đầy đủ ảnh chụp từ iPhone (định dạng Apple .HEIC) và các file ảnh JPG, PNG...
+
+2. XEM KẾT QUẢ QUÉT:
+   - Dòng XANH LÁ (✓): Quét thành công, đầy đủ thông tin: Số CCCD, CMND cũ, Họ tên, Ngày sinh, Tuổi, Giới tính, Quê quán, Thường trú, Ngày cấp...
+   - Dòng ĐỎ (✗): Không đọc được mã QR (do ảnh chụp bị lóa đèn flash, rung tay mờ nét, hoặc mất góc mã QR).
+
+3. CHỈNH SỬA THÔNG TIN TRỰC TIẾP TRÊN BẢNG:
+   - Muốn sửa bất kỳ ô nào (họ tên, ngày cấp, thường trú...): Nhấp đúp chuột (Double Click) vào ô đó, gõ lại nội dung rồi nhấn phím "Enter" để lưu.
+
+4. QUẢN LÝ DÒNG & XÓA DÒNG:
+   - Xóa 1 dòng: Click chọn dòng đó rồi bấm nút "🗑 Xóa dòng đã chọn" (hoặc phím Delete trên bàn phím).
+   - Chọn nhiều dòng: Giữ phím "Ctrl" rồi click vào các dòng muốn chọn (hoặc giữ "Shift" để chọn dải dòng, hoặc nhấn "Ctrl + A" để chọn tất cả).
+   - Nút xóa sẽ hiển thị số lượng dòng đang chọn: ví dụ "🗑 Xóa [5] dòng đã chọn".
+   - Lọc ảnh lỗi: Tích chọn ô "Chỉ hiện ảnh lỗi (X)" ở thanh dưới để xem riêng các ảnh cần chụp lại hoặc xóa nhanh ảnh lỗi.
+
+5. TÙY CHỈNH CỘT DỮ LIỆU XUẤT EXCEL (Bảng bên trái):
+   - Chọn cột xuất: Click chuột vào ô vuông checkbox ở cột "Chọn" (có dấu tick là xuất, trống là ẩn).
+   - Đổi thứ tự cột trong file Excel: Chọn tên cột rồi bấm nút "▲ Lên" hoặc "▼ Xuống".
+   - Khôi phục chuẩn: Bấm nút "Mặc định".
+   - Cấu hình này được lưu tự động cho các lần mở app sau.
+
+6. XUẤT DỮ LIỆU RA EXCEL:
+   - "📊 Xuất Excel mới": Tạo một file Excel mới tinh, tự động kẻ viền bảng và căn chỉnh độ rộng cột chuẩn đẹp.
+   - "📥 Ghi tiếp vào file Excel": Chọn file Excel có sẵn để ghi nối tiếp các dòng quét mới vào cuối bảng dữ liệu cũ (có tự động tạo bản sao lưu an toàn .bak).
+   * LƯU Ý: Phần mềm sẽ tự động bỏ qua các ảnh lỗi (chỉ xuất các thẻ thành công) và không đưa cột trạng thái thừa thãi vào file Excel.
+
+7. ĐỔI GIAO DIỆN SÁNG / TỐI:
+   - Ở góc trên cùng bên phải: Chọn "☀️ Sáng" (thanh lịch, dịu mắt ban ngày) hoặc "🌙 Tối" (nền Obsidian dịu mắt ban đêm).
+
+
+PHẦN 3: MẸO CHỤP ẢNH CCCD ĐỂ QUÉT CHUẨN 100%
+--------------------------------------------------------------------------------
+1. TRÁNH LÓA ĐÈN FLASH: Không để ánh đèn flash hoặc bóng đèn trần chiếu thẳng tạo thành vệt sáng trắng chói lên mã QR (góc trên bên phải thẻ).
+2. GIỮ NÉT RÕ RÀNG: Giữ chắc tay khi chụp, không để ảnh bị rung nhòe các ô vuông nhỏ của mã QR.
+3. CHỤP ĐẦY ĐỦ GÓC: Đảm bảo không bị mất góc ô vuông mã QR và không để ngón tay che vào viền mã QR.
+4. GỬI ẢNH QUA ZALO: Luôn tích chọn chế độ "HD" trước khi bấm gửi để giữ trọn độ nét ban đầu.
+
+
+PHẦN 4: HƯỚNG DẪN GỠ CÀI ĐẶT (UNINSTALL)
+--------------------------------------------------------------------------------
+- Mở Start Menu máy tính -> Vào thư mục "App quét CCCD cho Nger ❤️" -> Chọn "Gỡ cài đặt App quét CCCD cho Nger".
+- Hoặc vào Windows Settings -> Apps -> Installed Apps -> Tìm ứng dụng và chọn "Uninstall".
+================================================================================

@@ -1,0 +1,7 @@
+opencv-contrib-python>=4.10.0.84
+zxing-cpp>=2.2.0
+openpyxl>=3.1.2
+pillow-heif>=1.8.0
+pillow>=10.0.0
+pyinstaller>=6.6.0
+pytest>=8.2.0
