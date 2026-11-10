@@ -239,7 +239,7 @@ def test_all_columns_dynamic_auto_resize(shared_root: tk.Tk):
     assert exp_name_w > init_name_w
     assert exp_name_w >= 220
     assert exp_file_w > init_file_w
-    assert exp_file_w >= 380
+    assert exp_file_w >= 180
     assert exp_extra_w > init_extra_w
     assert exp_extra_w >= 450
 

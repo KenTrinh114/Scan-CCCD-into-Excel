@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets/wechat_models', 'assets/wechat_models'), ('assets/app_icon.ico', 'assets'), ('assets/app_icon.png', 'assets')],
+    datas=[('assets/wechat_models', 'assets/wechat_models'), ('assets/app_icon.ico', 'assets'), ('assets/app_icon.png', 'assets'), ('assets/icon_split.png', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

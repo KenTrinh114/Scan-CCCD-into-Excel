@@ -1,11 +1,12 @@
 """Fault-tolerant Vietnamese CCCD QR payload parser, date formatter, and expiry calculator."""
 
-import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from src.config import DEFAULT_COLUMNS, PROVINCE_CODES
+
+_EMPTY_RECORD_TEMPLATE: dict[str, Any] = {col["key"]: "" for col in DEFAULT_COLUMNS}
 
 
 def parse_vn_date(raw_ddmmyyyy: str) -> datetime | None:
@@ -16,7 +17,7 @@ def parse_vn_date(raw_ddmmyyyy: str) -> datetime | None:
     if not raw_ddmmyyyy:
         return None
     s = raw_ddmmyyyy.strip()
-    if not re.fullmatch(r"\d{8}", s):
+    if len(s) != 8 or not s.isdigit():
         return None
     try:
         return datetime.strptime(s, "%d%m%Y")
@@ -72,7 +73,7 @@ def build_record(file_path: Path, qr_text: str | None, scan_note: str) -> dict[s
     Always includes all 13 schema keys initialized to empty string,
     plus internal keys '_is_error' and '_full_path'.
     """
-    record: dict[str, Any] = {col["key"]: "" for col in DEFAULT_COLUMNS}
+    record: dict[str, Any] = dict(_EMPTY_RECORD_TEMPLATE)
     record["_is_error"] = False
     record["_full_path"] = str(file_path)
     record["source_file"] = file_path.name

@@ -21,6 +21,9 @@ installer_output/
 .coverage
 htmlcov/
 *.log
+scratch/
+assets/preview_*.png
+assets/icon_split_*.png
 
 # Environment & local settings
 .env

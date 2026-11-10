@@ -7,6 +7,7 @@ from pathlib import Path
 import queue
 import shutil
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import tkinter.font as tkfont
@@ -23,13 +24,14 @@ from src.config import (
 )
 from src.excel_exporter import append_records_to_excel, export_records_to_excel
 from src.parser import build_record
-from src.qr_engine import CCCDQRScanner
-from src.version import APP_VERSION, BUILD_TIME
+from src.qr_engine import CCCDQRScanner, get_asset_path
+from src.version import APP_VERSION
 from src.failed_handler import (
     HoverPreview,
     make_preview,
     move_failed,
     open_path,
+    replace_or_move,
     restore_moved,
     safe_name,
 )
@@ -80,6 +82,9 @@ THEMES: dict[str, dict[str, Any]] = {
         "danger_btn_fg": "#991B1B",
         "danger_btn_active": "#FECACA",
         "danger_btn_border": "#FCA5A5",
+        "split_btn_bg": "#991B1B",     # Dark Red for Split / Merge list
+        "split_btn_fg": "#FFFFFF",
+        "split_btn_active": "#7F1D1D", # Deep Crimson Dark Red
         "btn_bg": "#FFFFFF",
         "btn_fg": "#0F172A",
         "btn_active": "#CBD5E1",
@@ -138,6 +143,9 @@ THEMES: dict[str, dict[str, Any]] = {
         "danger_btn_fg": "#FFFFFF",    # High contrast crisp white
         "danger_btn_active": "#991B1B",
         "danger_btn_border": "#B91C1C",# Refined crimson border
+        "split_btn_bg": "#991B1B",     # Dark Red for Split / Merge list
+        "split_btn_fg": "#FFFFFF",
+        "split_btn_active": "#7F1D1D", # Deep Crimson Dark Red
         "btn_bg": "#232D3F",           # Elevated modern dark button surface (not pitch black)
         "btn_fg": "#F1F5F9",           # Crisp slate-100 text
         "btn_active": "#334155",
@@ -170,6 +178,7 @@ class CCCDScannerApp:
 
         # Set application icon from bundled assets
         self._setup_window_icon()
+        self._setup_split_button_icon()
 
         # Load user's chosen UI theme ('grey' is default off-white to eliminate glare)
         self.current_theme = load_theme_config()
@@ -216,6 +225,9 @@ class CCCDScannerApp:
         self.failed_item_to_rec_idx: dict[str, int] = {}
         self.last_input_dir: str | None = None
         self.last_moved_log_path: str | None = None
+        self._current_preview_rec: dict[str, Any] | None = None
+        self._current_card_photo: Any = None
+        self._resize_preview_job: Any = None
 
         # Build UI layout
         self._build_top_toolbar()
@@ -233,13 +245,8 @@ class CCCDScannerApp:
 
     def _setup_window_icon(self) -> None:
         """Set application window and taskbar icon from bundled assets."""
-        import sys
-        icon_ico = Path(__file__).parent.parent / "assets" / "app_icon.ico"
-        icon_png = Path(__file__).parent.parent / "assets" / "app_icon.png"
-        if not icon_ico.exists():
-            base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).parent.parent))
-            icon_ico = base_dir / "assets" / "app_icon.ico"
-            icon_png = base_dir / "assets" / "app_icon.png"
+        icon_ico = get_asset_path("assets/app_icon.ico")
+        icon_png = get_asset_path("assets/app_icon.png")
 
         try:
             if icon_ico.exists():
@@ -249,11 +256,50 @@ class CCCDScannerApp:
 
         try:
             if icon_png.exists():
-                icon_img = ImageTk.PhotoImage(Image.open(icon_png))
+                with Image.open(icon_png) as img:
+                    icon_img = ImageTk.PhotoImage(img.copy())
                 self.root.iconphoto(True, icon_img)
                 self._app_icon_img = icon_img
         except Exception:
             pass
+
+    def _setup_split_button_icon(self) -> None:
+        """Load and cache the split list icon from bundled assets or high-res vector fallback."""
+        icon_path = get_asset_path("assets/icon_split.png")
+        self._icon_split_img: ImageTk.PhotoImage | None = None
+
+        if icon_path.exists():
+            try:
+                with Image.open(icon_path) as im:
+                    im_18 = im.resize((18, 18), Image.Resampling.LANCZOS)
+                    self._icon_split_img = ImageTk.PhotoImage(im_18)
+            except Exception:
+                pass
+
+        if self._icon_split_img is None:
+            try:
+                from PIL import ImageDraw
+                s = 72
+                img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+                d = ImageDraw.Draw(img)
+                pad_x = 6
+                h_box = 26
+                gap = 7
+                radius = 8
+                stroke = 5
+                white = (255, 255, 255, 255)
+
+                for y_top in [6, 6 + h_box + gap]:
+                    y_bot = y_top + h_box
+                    d.rounded_rectangle([pad_x, y_top, s - pad_x, y_bot], radius=radius, outline=white, width=stroke)
+                    dot_cx, dot_cy = pad_x + 15, (y_top + y_bot) // 2
+                    d.ellipse([dot_cx - 4, dot_cy - 4, dot_cx + 4, dot_cy + 4], fill=white)
+                    d.rounded_rectangle([dot_cx + 10, dot_cy - 3, s - pad_x - 12, dot_cy + 3], radius=3, fill=white)
+
+                res = img.resize((18, 18), Image.Resampling.LANCZOS)
+                self._icon_split_img = ImageTk.PhotoImage(res)
+            except Exception:
+                pass
 
     def _setup_styles(self) -> None:
         self.style = ttk.Style()
@@ -341,71 +387,39 @@ class CCCDScannerApp:
         # ---------------------------------------------------------------------
         # Native, Clean, Flat Button Styles (No box outlines, no focus borders)
         # ---------------------------------------------------------------------
-        # Primary Ingestion (Add Files, Add Folder)
-        self.style.configure(
-            "Primary.TButton",
-            background=t["primary_btn_bg"],
-            foreground=t["primary_btn_fg"],
-            bordercolor=t["primary_btn_bg"],
-            lightcolor=t["primary_btn_bg"],
-            darkcolor=t["primary_btn_bg"],
-            relief="flat",
-            borderwidth=0,
-            focusthickness=0,
-            focuscolor="",
-            font=("Segoe UI", 9, "bold"),
-            padding=(10, 4),
-        )
-        self.style.map(
-            "Primary.TButton",
-            background=[("active", t["primary_btn_active"]), ("disabled", t["frame_bg"])],
-            foreground=[("disabled", t["text_muted"])],
-            bordercolor=[("active", t["primary_btn_active"]), ("disabled", t["frame_bg"])],
-        )
-
-        # Excel Export (New .xlsx)
-        self.style.configure(
-            "Excel.TButton",
-            background=t["excel_btn_bg"],
-            foreground=t["excel_btn_fg"],
-            bordercolor=t["excel_btn_bg"],
-            lightcolor=t["excel_btn_bg"],
-            darkcolor=t["excel_btn_bg"],
-            relief="flat",
-            borderwidth=0,
-            focusthickness=0,
-            focuscolor="",
-            font=("Segoe UI", 9, "bold"),
-            padding=(10, 4),
-        )
-        self.style.map(
-            "Excel.TButton",
-            background=[("active", t["excel_btn_active"]), ("disabled", t["frame_bg"])],
-            foreground=[("disabled", t["text_muted"])],
-            bordercolor=[("active", t["excel_btn_active"]), ("disabled", t["frame_bg"])],
-        )
-
-        # Excel Append (Append to existing)
-        self.style.configure(
-            "Append.TButton",
-            background=t["append_btn_bg"],
-            foreground=t["append_btn_fg"],
-            bordercolor=t["append_btn_bg"],
-            lightcolor=t["append_btn_bg"],
-            darkcolor=t["append_btn_bg"],
-            relief="flat",
-            borderwidth=0,
-            focusthickness=0,
-            focuscolor="",
-            font=("Segoe UI", 9, "bold"),
-            padding=(10, 4),
-        )
-        self.style.map(
-            "Append.TButton",
-            background=[("active", t["append_btn_active"]), ("disabled", t["frame_bg"])],
-            foreground=[("disabled", t["text_muted"])],
-            bordercolor=[("active", t["append_btn_active"]), ("disabled", t["frame_bg"])],
-        )
+        # Primary Action Buttons (Add Files, Excel Export, Excel Append, Split / Merge)
+        feature_buttons = [
+            ("Primary.TButton", t["primary_btn_bg"], t["primary_btn_active"], t["primary_btn_fg"]),
+            ("Excel.TButton", t["excel_btn_bg"], t["excel_btn_active"], t["excel_btn_fg"]),
+            ("Append.TButton", t["append_btn_bg"], t["append_btn_active"], t["append_btn_fg"]),
+            (
+                "Split.TButton",
+                t.get("split_btn_bg", "#991B1B"),
+                t.get("split_btn_active", "#7F1D1D"),
+                t.get("split_btn_fg", "#FFFFFF"),
+            ),
+        ]
+        for style_name, bg_col, active_col, fg_col in feature_buttons:
+            self.style.configure(
+                style_name,
+                background=bg_col,
+                foreground=fg_col,
+                bordercolor=bg_col,
+                lightcolor=bg_col,
+                darkcolor=bg_col,
+                relief="flat",
+                borderwidth=0,
+                focusthickness=0,
+                focuscolor="",
+                font=("Segoe UI", 9, "bold"),
+                padding=(10, 4),
+            )
+            self.style.map(
+                style_name,
+                background=[("active", active_col), ("disabled", t["frame_bg"])],
+                foreground=[("disabled", t["text_muted"])],
+                bordercolor=[("active", active_col), ("disabled", t["frame_bg"])],
+            )
 
         # Danger List Action (Clear List)
         self.style.configure(
@@ -454,22 +468,24 @@ class CCCDScannerApp:
         # Small Standard (Column reordering: Up, Down, Reset, Select All)
         self.style.configure(
             "Small.TButton",
+            width=0,
             background=t["btn_bg"],
             foreground=t["btn_fg"],
-            bordercolor=t["border_dark"],
-            lightcolor=t["border_dark"],
-            darkcolor=t["border_dark"],
+            bordercolor=t["border_col"],
+            lightcolor=t["border_col"],
+            darkcolor=t["border_col"],
             relief="flat",
             borderwidth=1,
             focusthickness=0,
             focuscolor="",
             font=("Segoe UI", 8),
-            padding=(6, 2),
+            padding=(5, 2),
         )
         self.style.map(
             "Small.TButton",
-            background=[("active", t["btn_active"])],
-            bordercolor=[("active", t["text_muted"])],
+            background=[("pressed", t["border_col"]), ("active", t["btn_active"])],
+            foreground=[("active", t["heading_fg"])],
+            bordercolor=[("active", t["border_dark"])],
         )
 
         # Default TButton
@@ -635,12 +651,18 @@ class CCCDScannerApp:
             self.lbl_theme.configure(bg=t["frame_bg"], fg=t["text_main"])
         if hasattr(self, "lbl_hint"):
             self.lbl_hint.configure(bg=t["frame_bg"], fg=t["text_muted"])
+        if hasattr(self, "lbl_card_title"):
+            self.lbl_card_title.configure(bg=t["frame_bg"])
+        if hasattr(self, "lbl_card_hint"):
+            self.lbl_card_hint.configure(bg=t["frame_bg"], fg=t["text_muted"])
         if hasattr(self, "lbl_right_hint"):
             self.lbl_right_hint.configure(bg=t["frame_bg"], fg=t["text_muted"])
         if hasattr(self, "div_toolbar_1"):
             self.div_toolbar_1.configure(bg=t["border_rail"])
         if hasattr(self, "div_toolbar_2"):
             self.div_toolbar_2.configure(bg=t["border_rail"])
+        if hasattr(self, "toolbar_sep"):
+            self.toolbar_sep.configure(bg=t["border_col"])
         if hasattr(self, "status_frame"):
             self.status_frame.configure(
                 bg=t["frame_bg"],
@@ -673,17 +695,19 @@ class CCCDScannerApp:
         if hasattr(self, "lbl_empty_version"):
             self.lbl_empty_version.configure(bg=t["frame_bg"], fg=t["text_muted"])
 
+        def _apply_row_tags(tree: ttk.Treeview) -> None:
+            tree.tag_configure("even_row", background=t["tree_even"], foreground=t["tree_fg"])
+            tree.tag_configure("odd_row", background=t["tree_odd"], foreground=t["tree_fg"])
+
         # Table Row Tags: Green text for success, red text for error, alternating row backgrounds
         if hasattr(self, "table"):
             self.table.tag_configure("success_row", foreground=t["success_fg"])
             self.table.tag_configure("error_row", foreground=t["err_fg"])
             self.table.tag_configure("pending_row", foreground=t["pending_fg"])
-            self.table.tag_configure("even_row", background=t["tree_even"], foreground=t["tree_fg"])
-            self.table.tag_configure("odd_row", background=t["tree_odd"], foreground=t["tree_fg"])
+            _apply_row_tags(self.table)
 
         if hasattr(self, "col_tree"):
-            self.col_tree.tag_configure("even_row", background=t["tree_even"], foreground=t["tree_fg"])
-            self.col_tree.tag_configure("odd_row", background=t["tree_odd"], foreground=t["tree_fg"])
+            _apply_row_tags(self.col_tree)
 
         # Split view widgets
         if hasattr(self, "right_header_bar"):
@@ -714,13 +738,11 @@ class CCCDScannerApp:
 
         if hasattr(self, "tree_passed"):
             self.tree_passed.tag_configure("success_row", foreground=t["success_fg"])
-            self.tree_passed.tag_configure("even_row", background=t["tree_even"], foreground=t["tree_fg"])
-            self.tree_passed.tag_configure("odd_row", background=t["tree_odd"], foreground=t["tree_fg"])
+            _apply_row_tags(self.tree_passed)
 
         if hasattr(self, "tree_failed"):
             self.tree_failed.tag_configure("error_row", foreground=t["err_fg"])
-            self.tree_failed.tag_configure("even_row", background=t["tree_even"], foreground=t["tree_fg"])
-            self.tree_failed.tag_configure("odd_row", background=t["tree_odd"], foreground=t["tree_fg"])
+            _apply_row_tags(self.tree_failed)
 
     # =========================================================================
     # UI Layout Construction
@@ -773,6 +795,21 @@ class CCCDScannerApp:
         self.div_toolbar_2.pack(side=tk.LEFT, padx=(0, 8), fill=tk.Y, pady=2)
 
         # Cluster 3: List Operations & Filters
+        btn_kwargs: dict[str, Any] = {
+            "text": " Tách danh sách lỗi",
+            "style": "Split.TButton",
+            "command": self._on_toggle_split_view,
+        }
+        if getattr(self, "_icon_split_img", None) is not None:
+            btn_kwargs["image"] = self._icon_split_img
+            btn_kwargs["compound"] = "left"
+
+        self.btn_split_toggle = ttk.Button(
+            self.top_toolbar,
+            **btn_kwargs,
+        )
+        self.btn_split_toggle.pack(side=tk.LEFT, padx=(0, 8))
+
         btn_clear = ttk.Button(
             self.top_toolbar,
             text="🗑 Xóa danh sách",
@@ -780,6 +817,7 @@ class CCCDScannerApp:
             command=self._on_clear_list,
         )
         btn_clear.pack(side=tk.LEFT, padx=(0, 8))
+        self.btn_clear = btn_clear
 
         # Retained for internal backwards-compatibility with existing tests, but omitted from UI
         self.filter_error_var = tk.BooleanVar(value=False)
@@ -789,14 +827,6 @@ class CCCDScannerApp:
             variable=self.filter_error_var,
             command=self._refresh_preview_table_data,
         )
-
-        self.btn_split_toggle = ttk.Button(
-            self.top_toolbar,
-            text="⚡ Tách danh sách lỗi",
-            style="Small.TButton",
-            command=self._on_toggle_split_view,
-        )
-        self.btn_split_toggle.pack(side=tk.LEFT, padx=(0, 8))
 
         # Cluster 4 (Far Right): Theme Selection
         self.theme_container = tk.Frame(self.top_toolbar)
@@ -837,59 +867,80 @@ class CCCDScannerApp:
         paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 6))
 
         # ---------------------------------------------------------------------
-        # Left Panel: Column Management
+        # Left Panel: Column Management & Split Preview Card
         # ---------------------------------------------------------------------
-        left_frame = ttk.LabelFrame(paned, text="Cột dữ liệu xuất Excel", padding=8)
-        paned.add(left_frame, weight=1)
+        self.left_container = ttk.Frame(paned, padding=6, width=330)
+        paned.add(self.left_container, weight=0)
 
-        # Helper description (concise UX copy)
+        # Section 1: Column Management
+        self.col_section = ttk.LabelFrame(self.left_container, text="Cột dữ liệu xuất Excel", padding=6)
+        self.col_section.pack(fill=tk.X, expand=False)
+
+        # Helper description (1 clean line)
         self.lbl_hint = tk.Label(
-            left_frame,
-            text="Tích chọn cột cần lấy. Dùng nút Lên/Xuống để đổi thứ tự xuất.",
+            self.col_section,
+            text="Tích chọn cột cần xuất. Dùng nút Lên/Xuống đổi thứ tự.",
             font=("Segoe UI", 8),
-            wraplength=230,
             justify=tk.LEFT,
         )
-        self.lbl_hint.pack(anchor="w", pady=(0, 6))
+        self.lbl_hint.pack(anchor="w", pady=(0, 5))
 
-        # Order Toolbar
-        left_toolbar = ttk.Frame(left_frame)
+        # Order & Selection Toolbar (Refined layout with clean visual grouping)
+        left_toolbar = ttk.Frame(self.col_section)
         left_toolbar.pack(fill=tk.X, pady=(0, 6))
 
+        # Group 1: Reorder (Up / Down)
         btn_up = ttk.Button(
             left_toolbar, text="▲ Lên", style="Small.TButton", command=self._on_move_col_up
         )
-        btn_up.pack(side=tk.LEFT, padx=(0, 4))
+        btn_up.pack(side=tk.LEFT, padx=(0, 2))
 
         btn_down = ttk.Button(
             left_toolbar, text="▼ Xuống", style="Small.TButton", command=self._on_move_col_down
         )
         btn_down.pack(side=tk.LEFT, padx=(0, 4))
 
+        # Vertical Divider Rail between Reorder and Selection
+        t = THEMES[self.current_theme]
+        self.toolbar_sep = tk.Frame(left_toolbar, width=1, bg=t["border_col"])
+        self.toolbar_sep.pack(side=tk.LEFT, fill=tk.Y, padx=(2, 4), pady=2)
+
+        # Group 2: Selection (All / None)
+        btn_select_all = ttk.Button(
+            left_toolbar, text="Tất cả", style="Small.TButton", command=self._on_select_all_cols
+        )
+        btn_select_all.pack(side=tk.LEFT, padx=(0, 2))
+
+        btn_deselect_all = ttk.Button(
+            left_toolbar, text="Bỏ chọn", style="Small.TButton", command=self._on_deselect_all_cols
+        )
+        btn_deselect_all.pack(side=tk.LEFT, padx=(0, 2))
+
+        # Group 3: Default Reset (Right-aligned)
         btn_reset = ttk.Button(
             left_toolbar, text="Mặc định", style="Small.TButton", command=self._on_reset_columns
         )
         btn_reset.pack(side=tk.RIGHT)
 
         # Left Column Treeview
-        col_tree_frame = ttk.Frame(left_frame)
-        col_tree_frame.pack(fill=tk.BOTH, expand=True)
+        self.col_tree_frame = ttk.Frame(self.col_section)
+        self.col_tree_frame.pack(fill=tk.BOTH, expand=True)
 
         self.col_tree = ttk.Treeview(
-            col_tree_frame,
+            self.col_tree_frame,
             columns=("checked", "order", "label"),
             show="headings",
             selectmode="browse",
-            height=13,
+            height=7,
         )
         self.col_tree.heading("checked", text="◼ Chọn")
-        self.col_tree.column("checked", width=54, anchor="center")
+        self.col_tree.column("checked", width=52, anchor="center", stretch=False)
         self.col_tree.heading("order", text="#")
-        self.col_tree.column("order", width=36, anchor="center")
+        self.col_tree.column("order", width=36, anchor="center", stretch=False)
         self.col_tree.heading("label", text="Tên cột")
-        self.col_tree.column("label", width=170, anchor="w")
+        self.col_tree.column("label", width=180, anchor="w", stretch=True)
 
-        col_tree_scroll = ttk.Scrollbar(col_tree_frame, orient=tk.VERTICAL, command=self.col_tree.yview)
+        col_tree_scroll = ttk.Scrollbar(self.col_tree_frame, orient=tk.VERTICAL, command=self.col_tree.yview)
         self.col_tree.configure(yscrollcommand=col_tree_scroll.set)
         self.col_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         col_tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -899,17 +950,45 @@ class CCCDScannerApp:
         self.col_tree.bind("<Motion>", self._on_col_tree_motion)
         self.col_tree.bind("<space>", self._on_col_tree_space)
 
-        # Select all / Deselect all
-        left_bottom = ttk.Frame(left_frame)
-        left_bottom.pack(fill=tk.X, pady=(6, 0))
-        btn_select_all = ttk.Button(
-            left_bottom, text="Chọn tất cả", style="Small.TButton", command=self._on_select_all_cols
+        # Section 2: Embedded Image Preview Card (Active across all modes)
+        self.preview_card = ttk.LabelFrame(self.left_container, text="Xem lại ảnh CCCD", padding=4)
+        self.preview_card.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
+
+        self.lbl_card_title = tk.Label(
+            self.preview_card,
+            text="📷 Chưa chọn ảnh",
+            font=("Segoe UI", 8, "bold"),
+            anchor="w",
+            padx=2,
+            pady=2,
         )
-        btn_select_all.pack(side=tk.LEFT, padx=(0, 4))
-        btn_deselect_all = ttk.Button(
-            left_bottom, text="Bỏ chọn", style="Small.TButton", command=self._on_deselect_all_cols
+        self.lbl_card_title.pack(fill=tk.X, pady=(0, 2))
+
+        self.card_img_frame = tk.Frame(self.preview_card, bg="#0F172A", bd=1, relief="solid")
+        self.card_img_frame.pack(fill=tk.BOTH, expand=True)
+        self.card_img_frame.bind("<Configure>", self._on_preview_card_resize)
+
+        self.lbl_card_img = tk.Label(
+            self.card_img_frame,
+            bg="#0F172A",
+            fg="#94A3B8",
+            text="Nhấp vào dòng ảnh trong\ndanh sách kết quả để xem lại ảnh thẻ tại đây",
+            font=("Segoe UI", 8),
+            cursor="hand2",
+            justify=tk.CENTER,
         )
-        btn_deselect_all.pack(side=tk.LEFT)
+        self.lbl_card_img.pack(fill=tk.BOTH, expand=True)
+        self.lbl_card_img.bind("<Button-1>", self._on_preview_card_click)
+        self.lbl_card_img.bind("<Double-Button-1>", self._on_preview_card_click)
+
+        self.lbl_card_hint = tk.Label(
+            self.preview_card,
+            text="(Nhấp vào ảnh để mở ảnh gốc)",
+            font=("Segoe UI", 8),
+            anchor="center",
+            pady=2,
+        )
+        self.lbl_card_hint.pack(fill=tk.X, pady=(2, 0))
 
         # ---------------------------------------------------------------------
         # Right Panel: Results Preview Table
@@ -919,7 +998,7 @@ class CCCDScannerApp:
             text="Danh sách kết quả quét",
             padding=8,
         )
-        paned.add(self.right_frame, weight=4)
+        paned.add(self.right_frame, weight=1)
 
         # Subtitle header bar with hint & split toggle button
         self.right_header_bar = tk.Frame(self.right_frame)
@@ -932,13 +1011,8 @@ class CCCDScannerApp:
         )
         self.lbl_right_hint.pack(side=tk.LEFT)
 
-        self.btn_split_sub = ttk.Button(
-            self.right_header_bar,
-            text="⚡ Tách danh sách lỗi",
-            style="Small.TButton",
-            command=self._on_toggle_split_view,
-        )
-        self.btn_split_sub.pack(side=tk.RIGHT)
+        # Single prominent button at top toolbar is used; alias retained for test compatibility
+        self.btn_split_sub = self.btn_split_toggle
 
         # Main Table Container
         self.table_container = ttk.Frame(self.right_frame)
@@ -967,8 +1041,9 @@ class CCCDScannerApp:
         # Horizontal scrolling with Shift + MouseWheel (standard on Windows)
         self.table.bind("<Shift-MouseWheel>", self._on_table_shift_mousewheel)
 
-        # Update button states on selection changes
-        self.table.bind("<<TreeviewSelect>>", self._on_table_select_changed)
+        # Update button states & preview card on selection changes or single click
+        self.table.bind("<<TreeviewSelect>>", self._on_table_select_changed, add="+")
+        self.table.bind("<Button-1>", lambda e: self._on_tree_click_select(self.table, self.item_to_rec_idx, e), add="+")
 
         # ---------------------------------------------------------------------
         # Split View Container (Passed / Failed split lists)
@@ -987,14 +1062,14 @@ class CCCDScannerApp:
 
         self.lbl_passed_title = tk.Label(
             self.hdr_passed,
-            text="✅ Danh sách Đạt (0)",
+            text="Danh sách quét thành công - 0 ảnh",
             font=("Segoe UI", 9, "bold"),
         )
         self.lbl_passed_title.pack(side=tk.LEFT)
 
         self.lbl_passed_hint = tk.Label(
             self.hdr_passed,
-            text="— Thẻ CCCD quét thành công, sẵn sàng xuất Excel",
+            text="— 💡 Nhấp vào dòng để xem ảnh • Nhấp đúp ô để xem đầy đủ / sửa",
             font=("Segoe UI", 8),
         )
         self.lbl_passed_hint.pack(side=tk.LEFT, padx=(4, 0))
@@ -1004,22 +1079,9 @@ class CCCDScannerApp:
 
         self.tree_passed = ttk.Treeview(
             tree_passed_container,
-            columns=("n", "file", "name", "cccd", "dob", "status"),
             show="headings",
             selectmode="extended",
         )
-        self.tree_passed.heading("n", text="#")
-        self.tree_passed.column("n", width=40, anchor="center")
-        self.tree_passed.heading("file", text="Tên file ảnh")
-        self.tree_passed.column("file", width=160, anchor="w")
-        self.tree_passed.heading("name", text="Họ và tên")
-        self.tree_passed.column("name", width=180, anchor="w")
-        self.tree_passed.heading("cccd", text="Số định danh / CCCD")
-        self.tree_passed.column("cccd", width=130, anchor="center")
-        self.tree_passed.heading("dob", text="Ngày sinh")
-        self.tree_passed.column("dob", width=90, anchor="center")
-        self.tree_passed.heading("status", text="Trạng thái")
-        self.tree_passed.column("status", width=120, anchor="w")
 
         self.tree_passed_scroll_y = ttk.Scrollbar(tree_passed_container, orient=tk.VERTICAL, command=self.tree_passed.yview)
         self.tree_passed_scroll_x = ttk.Scrollbar(tree_passed_container, orient=tk.HORIZONTAL, command=self.tree_passed.xview)
@@ -1031,6 +1093,8 @@ class CCCDScannerApp:
         tree_passed_container.grid_rowconfigure(0, weight=1)
         tree_passed_container.grid_columnconfigure(0, weight=1)
 
+        self.tree_passed.bind("<<TreeviewSelect>>", lambda e: self._on_split_tree_select(self.tree_passed, self.passed_item_to_rec_idx), add="+")
+        self.tree_passed.bind("<Button-1>", lambda e: self._on_tree_click_select(self.tree_passed, self.passed_item_to_rec_idx, e), add="+")
         self.tree_passed.bind("<Double-Button-1>", self._on_split_passed_double_click)
         self.tree_passed.bind("<Delete>", self._on_split_passed_delete)
         self.tree_passed.bind("<BackSpace>", self._on_split_passed_delete)
@@ -1044,14 +1108,14 @@ class CCCDScannerApp:
 
         self.lbl_failed_title = tk.Label(
             self.hdr_failed,
-            text="❌ Danh sách Cần chụp lại (0)",
+            text="Danh sách quét thất bại - 0 ảnh",
             font=("Segoe UI", 9, "bold"),
         )
         self.lbl_failed_title.pack(side=tk.LEFT)
 
         self.lbl_failed_hint = tk.Label(
             self.hdr_failed,
-            text="— 💡 Rê chuột để xem ảnh • Nhấp đúp ô Tên để sửa • Nhấp đúp dòng để mở ảnh",
+            text="— 💡 Nhấp vào dòng để xem ảnh • Nhấp đúp ô để xem đầy đủ / sửa",
             font=("Segoe UI", 8),
         )
         self.lbl_failed_hint.pack(side=tk.LEFT, padx=(4, 0))
@@ -1061,18 +1125,9 @@ class CCCDScannerApp:
 
         self.tree_failed = ttk.Treeview(
             tree_failed_container,
-            columns=("n", "file", "name", "status"),
             show="headings",
             selectmode="extended",
         )
-        self.tree_failed.heading("n", text="#")
-        self.tree_failed.column("n", width=45, anchor="center")
-        self.tree_failed.heading("file", text="Tên file ảnh")
-        self.tree_failed.column("file", width=180, anchor="w")
-        self.tree_failed.heading("name", text="Họ và tên (chủ thẻ)")
-        self.tree_failed.column("name", width=220, anchor="w")
-        self.tree_failed.heading("status", text="Trạng thái lỗi (cần chụp lại)")
-        self.tree_failed.column("status", width=360, anchor="w")
 
         self.tree_failed_scroll_y = ttk.Scrollbar(tree_failed_container, orient=tk.VERTICAL, command=self.tree_failed.yview)
         self.tree_failed_scroll_x = ttk.Scrollbar(tree_failed_container, orient=tk.HORIZONTAL, command=self.tree_failed.xview)
@@ -1095,13 +1150,10 @@ class CCCDScannerApp:
             bd=1,
         )
 
-        # Attach HoverPreview ONLY to the Failed treeview!
-        self.failed_hover_preview = HoverPreview(
-            self.tree_failed,
-            lambda row_id: self.records[self.failed_item_to_rec_idx[row_id]].get("_full_path")
-            if row_id in self.failed_item_to_rec_idx and self.failed_item_to_rec_idx[row_id] < len(self.records)
-            else None,
-        )
+        # Embedded preview card in left sidebar is used in Split Mode (single click to view)
+        self.failed_hover_preview = None
+        self.tree_failed.bind("<<TreeviewSelect>>", lambda e: self._on_split_tree_select(self.tree_failed, self.failed_item_to_rec_idx), add="+")
+        self.tree_failed.bind("<Button-1>", lambda e: self._on_tree_click_select(self.tree_failed, self.failed_item_to_rec_idx, e), add="+")
 
         self.tree_failed.bind("<Double-Button-1>", self._on_split_failed_double_click)
         self.tree_failed.bind("<Delete>", self._on_split_failed_delete)
@@ -1131,13 +1183,8 @@ class CCCDScannerApp:
         )
         self.lbl_move_status.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        self.btn_merge_back = ttk.Button(
-            self.failed_toolbar,
-            text="📋 Gộp lại danh sách chính",
-            style="Small.TButton",
-            command=self._on_toggle_split_view,
-        )
-        self.btn_merge_back.pack(side=tk.RIGHT)
+        # Single prominent button at top toolbar is used; alias retained for test compatibility
+        self.btn_merge_back = self.btn_split_toggle
 
         # Friendly Empty State Overlay
         self._build_empty_state_overlay()
@@ -1204,7 +1251,7 @@ class CCCDScannerApp:
 
         self.lbl_empty_version = tk.Label(
             self.empty_frame,
-            text=f"Phiên bản: v{APP_VERSION} (Cập nhật: {BUILD_TIME})",
+            text=f"Phiên bản: v{APP_VERSION}",
             font=("Segoe UI", 8),
         )
         self.lbl_empty_version.pack(pady=(8, 0))
@@ -1380,6 +1427,29 @@ class CCCDScannerApp:
     # =========================================================================
     # Error Message Formatting & Column Auto-Resizing
     # =========================================================================
+    def _truncate_filename(self, filename: str, max_len: int = 28) -> str:
+        """
+        Truncate a long filename with '...' preserving the file extension and unique tail digits.
+        Example: 'very_long_image_filename_from_phone_12345.jpg' -> 'very_long_im...12345.jpg'
+        """
+        if not filename or len(filename) <= max_len:
+            return filename
+
+        p = Path(filename)
+        ext = p.suffix
+        stem = p.stem
+
+        dots = "..."
+        overhead = len(ext) + len(dots)
+        if max_len <= overhead + 4:
+            return filename[: max_len - 3] + dots
+
+        avail = max_len - overhead
+        if avail > 6 and len(stem) > avail:
+            prefix_len = avail - 4
+            return f"{stem[:prefix_len]}{dots}{stem[-4:]}{ext}"
+        return f"{stem[:avail]}{dots}{ext}"
+
     def _get_display_value(
         self,
         rec: dict[str, Any],
@@ -1392,6 +1462,7 @@ class CCCDScannerApp:
         - Pending rows: display loading circle animation in the status column; other columns empty.
         - Success rows: display '🟢 Thành công' in green badge.
         - Error rows: display '🔴 [filename] Cần chụp lại: ...' in red badge.
+        - Long image names are truncated with '...' so error messages remain fully visible.
         """
         if spinner_frame is None:
             spinner_frame = self.SPINNER_FRAMES[self.spinner_frame_idx]
@@ -1404,26 +1475,31 @@ class CCCDScannerApp:
         if is_pending:
             if col_key == "status":
                 if not has_source_col and filename:
-                    return f"[{filename}] {spinner_frame} Đang xử lý..."
+                    short_fname = self._truncate_filename(filename, 22)
+                    return f"[{short_fname}] {spinner_frame} Đang xử lý..."
                 return f"{spinner_frame} Đang xử lý..."
             elif col_key == "source_file":
-                return str(filename)
+                return self._truncate_filename(str(filename), 28)
             else:
-                # Put a loading circle instead of all the columns
                 return ""
 
         raw_val = rec.get(col_key, "")
         val_str = str(raw_val) if raw_val is not None else ""
 
+        if col_key == "source_file":
+            return self._truncate_filename(val_str, 28)
+
         if col_key == "status":
             if is_err:
-                # Failed upload: heavy high-contrast X icon (colored red via error_row tag)
                 if not has_source_col and filename:
-                    return f"✖ [{filename}] {val_str}"
+                    short_fname = self._truncate_filename(filename, 22)
+                    return f"✖ [{short_fname}] {val_str}"
                 return f"✖ {val_str}"
             else:
-                # Success upload: heavy high-contrast Tick icon (colored green via success_row tag)
                 return f"✔ {val_str}"
+
+        if col_key == "full_name" and is_err and not val_str:
+            return "(chưa nhập tên)"
 
         return val_str
 
@@ -1431,7 +1507,7 @@ class CCCDScannerApp:
         """
         Dynamically auto-fit table column widths based on cell contents and headers.
         Applies to ALL column types (source_file, status, full_name, permanent_address, etc.)
-        to ensure no text is truncated or clipped.
+        across the main table and split views to ensure no text is truncated or clipped.
         Optimized with fast length heuristics to avoid font.measure overhead during bulk imports.
         """
         active = self._get_active_columns()
@@ -1440,8 +1516,13 @@ class CCCDScannerApp:
 
         font = tkfont.Font(font=("Segoe UI", 9))
         records_to_check = record_candidates if record_candidates is not None else self.records
-        # Sampling up to 100 records is statistically representative and keeps execution under 10ms
         sample_recs = records_to_check[:100] if len(records_to_check) > 100 else records_to_check
+
+        trees = [self.table]
+        if hasattr(self, "tree_passed"):
+            trees.append(self.tree_passed)
+        if hasattr(self, "tree_failed"):
+            trees.append(self.tree_failed)
 
         for col in active:
             key = col["key"]
@@ -1460,17 +1541,9 @@ class CCCDScannerApp:
 
             pad = 42 if key == "status" else 26
 
-            # Measure width across checked records with fast length pre-filter
             for rec in sample_recs:
-                if key == "status":
-                    val = self._get_display_value(rec, key, active)
-                else:
-                    raw_val = rec.get(key, "")
-                    val = str(raw_val) if raw_val is not None else ""
-
+                val = self._get_display_value(rec, key, active)
                 if val:
-                    # At 9pt Segoe UI, max char width is ~11px. If len(val)*11 + pad <= needed_w,
-                    # it mathematically cannot expand the column, so bypass font.measure.
                     if len(val) * 11 + pad <= needed_w:
                         continue
                     cell_w = font.measure(val) + pad
@@ -1480,10 +1553,11 @@ class CCCDScannerApp:
                             break
 
             if needed_w > curr_w:
-                try:
-                    self.table.column(key, width=needed_w, minwidth=max(60, base_w), stretch=False)
-                except Exception:
-                    pass
+                for tr in trees:
+                    try:
+                        tr.column(key, width=needed_w, minwidth=max(60, base_w), stretch=False)
+                    except Exception:
+                        pass
 
     def _adjust_status_column_width(self) -> None:
         """Backward-compatible helper that delegates to full-table dynamic column auto-fitting."""
@@ -1493,24 +1567,31 @@ class CCCDScannerApp:
     # Preview Table Operations
     # =========================================================================
     def _rebuild_preview_columns(self) -> None:
+        """Rebuild columns for the main preview table and both split-mode tables from user preferences."""
         active = self._get_active_columns()
-        col_keys = [c["key"] for c in active]
-        self.table["columns"] = col_keys
+        col_keys = ["#"] + [c["key"] for c in active]
 
-        for col in active:
-            key = col["key"]
-            self.table.heading(
-                key,
-                text=col["label"],
-                command=lambda k=key: self._on_sort_column(k),
-            )
-            width = col.get("width", 120)
-            anchor = (
-                "center"
-                if key in ("dob", "issue_date", "expiry_date", "sex", "age", "cccd_number", "old_cmnd")
-                else "w"
-            )
-            self.table.column(key, width=width, minwidth=60, anchor=anchor, stretch=False)
+        trees = [self.table]
+        if hasattr(self, "tree_passed"):
+            trees.append(self.tree_passed)
+        if hasattr(self, "tree_failed"):
+            trees.append(self.tree_failed)
+
+        for tree in trees:
+            tree["columns"] = col_keys
+            tree.heading("#", text="#", anchor="center")
+            tree.column("#", width=45, minwidth=35, anchor="center", stretch=False)
+
+            for col in active:
+                key = col["key"]
+                is_main_table = (tree is self.table)
+                heading_kwargs: dict[str, Any] = {"text": col["label"], "anchor": "center"}
+                if is_main_table:
+                    heading_kwargs["command"] = lambda k=key: self._on_sort_column(k)
+                tree.heading(key, **heading_kwargs)
+
+                width = col.get("width", 120)
+                tree.column(key, width=width, minwidth=60, anchor="center", stretch=False)
 
         self._adjust_all_column_widths()
 
@@ -1563,7 +1644,8 @@ class CCCDScannerApp:
             if filter_error_only and not is_err:
                 continue
 
-            values = [self._get_display_value(rec, c["key"], active, spinner_frame=frame) for c in active]
+            num_str = f"{displayed_count + 1:03d}"
+            values = [num_str] + [self._get_display_value(rec, c["key"], active, spinner_frame=frame) for c in active]
             if is_pending:
                 row_tag = "pending_row"
             elif is_err:
@@ -1582,12 +1664,24 @@ class CCCDScannerApp:
                 self.pending_item_ids[rec.get("_full_path", "")] = item_id
             displayed_count += 1
 
+        if getattr(self, "is_split_mode", False):
+            self._refresh_split_views()
         self._adjust_all_column_widths()
         self._check_empty_state()
 
     # =========================================================================
     # Inline Cell Editing
     # =========================================================================
+    def _open_image_path(self, path: str) -> None:
+        """Safely open an image with system viewer, with informative error dialogs."""
+        if path and os.path.exists(path):
+            try:
+                open_path(path)
+            except Exception as e:
+                messagebox.showerror("Lỗi mở ảnh", f"Không mở được tệp ảnh:\n{e}")
+        else:
+            messagebox.showwarning("Thông báo", f"Không tìm thấy file ảnh gốc:\n{path}")
+
     def _destroy_inline_entry(self) -> None:
         if self.active_inline_entry is not None:
             entry = self.active_inline_entry
@@ -1596,6 +1690,49 @@ class CCCDScannerApp:
                 entry.destroy()
             except Exception:
                 pass
+
+    def _create_inline_entry(
+        self,
+        tree: ttk.Treeview,
+        bbox: tuple[int, int, int, int],
+        initial_value: str,
+        on_commit: Any,
+    ) -> tk.Entry:
+        """Create and focus a styled inline editing entry cell on the given treeview."""
+        x, y, width, height = bbox
+        t = THEMES[self.current_theme]
+        entry = tk.Entry(
+            tree,
+            font=("Segoe UI", 10),
+            bg=t["entry_bg"],
+            fg=t["entry_fg"],
+            insertbackground=t["entry_caret"],
+            relief="solid",
+            bd=1,
+            highlightcolor=t["accent_bg"],
+            highlightthickness=1,
+            justify="center",
+        )
+        entry.insert(0, initial_value)
+        entry.select_range(0, tk.END)
+        entry.place(x=x, y=y, width=width, height=height)
+        entry.focus_set()
+        self.active_inline_entry = entry
+
+        def commit_edit(e: Any = None) -> None:
+            if self.active_inline_entry is None:
+                return
+            new_val = entry.get()
+            self._destroy_inline_entry()
+            on_commit(new_val)
+
+        def cancel_edit(e: Any = None) -> None:
+            self._destroy_inline_entry()
+
+        entry.bind("<Return>", commit_edit)
+        entry.bind("<FocusOut>", commit_edit)
+        entry.bind("<Escape>", cancel_edit)
+        return entry
 
     def _on_table_double_click(self, event: tk.Event) -> None:
         self._destroy_inline_entry()
@@ -1610,11 +1747,16 @@ class CCCDScannerApp:
             return
 
         col_index = int(col_id.replace("#", "")) - 1
-        active_cols = self._get_active_columns()
-        if col_index < 0 or col_index >= len(active_cols):
+        if col_index == 0:
+            # Column #1 is the uneditable sequence number column '#'
             return
 
-        col_info = active_cols[col_index]
+        active_cols = self._get_active_columns()
+        active_idx = col_index - 1
+        if active_idx < 0 or active_idx >= len(active_cols):
+            return
+
+        col_info = active_cols[active_idx]
         key = col_info["key"]
         rec_idx = self.item_to_rec_idx.get(item_id)
         if rec_idx is None or rec_idx >= len(self.records):
@@ -1628,50 +1770,19 @@ class CCCDScannerApp:
         if not bbox:
             return
 
-        x, y, width, height = bbox
-        current_val = self._get_display_value(self.records[rec_idx], key, active_cols)
+        raw_val = self.records[rec_idx].get(key, "")
+        current_val = str(raw_val) if raw_val is not None else ""
 
-        t = THEMES[self.current_theme]
-        entry = tk.Entry(
-            self.table,
-            font=("Segoe UI", 10),
-            bg=t["entry_bg"],
-            fg=t["entry_fg"],
-            insertbackground=t["entry_caret"],
-            relief="solid",
-            bd=1,
-            highlightcolor=t["accent_bg"],
-            highlightthickness=1,
-        )
-        align = (
-            "center"
-            if key in ("dob", "issue_date", "expiry_date", "sex", "age", "cccd_number", "old_cmnd")
-            else "left"
-        )
-        entry.configure(justify=align)
-        entry.insert(0, current_val)
-        entry.select_range(0, tk.END)
-        entry.place(x=x, y=y, width=width, height=height)
-        entry.focus_set()
-        self.active_inline_entry = entry
-
-        def commit_edit(e: Any = None) -> None:
-            if self.active_inline_entry is None:
-                return
-            new_val = entry.get()
-            self._destroy_inline_entry()
+        def commit_table_edit(new_val: str) -> None:
             self.records[rec_idx][key] = new_val
             current_vals = list(self.table.item(item_id, "values"))
-            current_vals[col_index] = new_val
+            current_vals[col_index] = self._get_display_value(self.records[rec_idx], key, active_cols)
             self.table.item(item_id, values=current_vals)
+            if self.is_split_mode:
+                self._refresh_split_views()
             self._adjust_all_column_widths([self.records[rec_idx]])
 
-        def cancel_edit(e: Any = None) -> None:
-            self._destroy_inline_entry()
-
-        entry.bind("<Return>", commit_edit)
-        entry.bind("<FocusOut>", commit_edit)
-        entry.bind("<Escape>", cancel_edit)
+        self._create_inline_entry(self.table, bbox, current_val, commit_table_edit)
 
     # =========================================================================
     # Scanning & Background Worker
@@ -1700,10 +1811,13 @@ class CCCDScannerApp:
         if folder:
             self.last_input_dir = str(folder)
             dir_path = Path(folder)
+            failed_dir_names = {"ảnh lỗi", "anh loi", "failed", "failed_images"}
             paths = [
                 p
                 for p in dir_path.rglob("*")
-                if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
+                if p.is_file()
+                and p.suffix.lower() in SUPPORTED_EXTENSIONS
+                and not any(part.lower() in failed_dir_names for part in p.parts)
             ]
             if not paths:
                 messagebox.showinfo(
@@ -1719,6 +1833,30 @@ class CCCDScannerApp:
         return bool(self.task_id_to_rec)
 
     def _start_scanning(self, paths: list[Path]) -> None:
+        if not paths:
+            return
+
+        # Deduplicate paths against already tracked records by resolved path
+        existing_paths: set[Path] = set()
+        for r in self.records:
+            full_p = r.get("_full_path")
+            if full_p:
+                try:
+                    existing_paths.add(Path(full_p).resolve())
+                except Exception:
+                    pass
+
+        unique_paths: list[Path] = []
+        for p in paths:
+            try:
+                resolved_p = p.resolve()
+            except Exception:
+                resolved_p = p
+            if resolved_p not in existing_paths:
+                unique_paths.append(p)
+                existing_paths.add(resolved_p)
+
+        paths = unique_paths
         if not paths:
             return
 
@@ -1747,7 +1885,8 @@ class CCCDScannerApp:
             self.records.append(pending_rec)
             new_pending_recs.append(pending_rec)
 
-            values = [self._get_display_value(pending_rec, c["key"], active) for c in active]
+            num_str = f"{rec_idx + 1:03d}"
+            values = [num_str] + [self._get_display_value(pending_rec, c["key"], active) for c in active]
             tag = "pending_row"
             parity_tag = "even_row" if rec_idx % 2 == 0 else "odd_row"
             item_id = self.table.insert("", tk.END, values=values, tags=(tag, parity_tag))
@@ -1846,6 +1985,17 @@ class CCCDScannerApp:
                 if self._active_workers <= 0:
                     self._active_workers = 0
                     self.is_scanning = False
+                    try:
+                        self.root.after(0, self._on_scan_completed_cleanup)
+                    except Exception:
+                        pass
+
+    def _on_scan_completed_cleanup(self) -> None:
+        """Invoked on GUI thread when all background scan workers finish."""
+        self._update_action_button_states()
+        if self.is_split_mode:
+            self._refresh_split_views()
+        gc.collect()
 
     def _process_queue(self) -> None:
         """Scheduled tick running every 80ms to process completed scan items."""
@@ -1911,8 +2061,9 @@ class CCCDScannerApp:
                         except Exception:
                             pass
                     else:
-                        values = [self._get_display_value(current_record, c["key"], active) for c in active]
                         rec_idx = current_record.get("_rec_idx", 0)
+                        num_str = f"{rec_idx + 1:03d}"
+                        values = [num_str] + [self._get_display_value(current_record, c["key"], active) for c in active]
                         parity_tag = "even_row" if rec_idx % 2 == 0 else "odd_row"
                         self.table.item(item_id, values=values, tags=(row_tag, parity_tag))
                         # Only auto-scroll for single/tiny imports. During bulk imports, keep table
@@ -1921,8 +2072,9 @@ class CCCDScannerApp:
                             self.table.see(item_id)
                 else:
                     if not (filter_error_only and not is_err):
-                        values = [self._get_display_value(current_record, c["key"], active) for c in active]
                         rec_idx = current_record.get("_rec_idx", len(self.records) - 1)
+                        num_str = f"{rec_idx + 1:03d}"
+                        values = [num_str] + [self._get_display_value(current_record, c["key"], active) for c in active]
                         parity_tag = "even_row" if rec_idx % 2 == 0 else "odd_row"
                         new_item_id = self.table.insert("", tk.END, values=values, tags=(row_tag, parity_tag))
                         self.item_to_rec_idx[new_item_id] = rec_idx
@@ -1934,7 +2086,10 @@ class CCCDScannerApp:
                 # Dynamically auto-fit column widths across all column types once per batch tick
                 self._adjust_all_column_widths(batch_records)
                 if self.is_split_mode:
-                    self._refresh_split_views()
+                    now = time.monotonic()
+                    if not self.is_scanning or (now - getattr(self, "_last_split_refresh_time", 0.0) >= 0.35):
+                        self._refresh_split_views()
+                        self._last_split_refresh_time = now
 
             self._check_empty_state()
             self._update_status_bar()
@@ -1970,18 +2125,27 @@ class CCCDScannerApp:
         new_records = [rec for i, rec in enumerate(self.records) if i not in indices_to_remove]
         self.records = new_records
 
-        # Recalculate summary counters
+        # Recalculate summary counters in single pass
         self.total_queued = len(self.records)
-        self.processed_count = sum(1 for r in self.records if not r.get("_is_pending", False))
-        self.success_count = sum(
-            1 for r in self.records if not r.get("_is_error", False) and not r.get("_is_pending", False)
-        )
-        self.error_count = sum(1 for r in self.records if r.get("_is_error", False))
+        processed = 0
+        success = 0
+        errors = 0
+        for r in self.records:
+            if not r.get("_is_pending", False):
+                processed += 1
+                if not r.get("_is_error", False):
+                    success += 1
+            if r.get("_is_error", False):
+                errors += 1
+        self.processed_count = processed
+        self.success_count = success
+        self.error_count = errors
 
         # Re-render preview table & status bar
         self._refresh_preview_table_data()
         if self.is_split_mode:
             self._refresh_split_views()
+        self._update_action_button_states()
         self._update_status_bar()
         self._check_empty_state()
 
@@ -2107,11 +2271,29 @@ class CCCDScannerApp:
         self.root.after(120, self._animate_spinner)
 
     def _on_table_select_changed(self, event: Any = None) -> None:
-        """Update context-sensitive action button states when row selection changes."""
+        """Update context-sensitive action button states and preview card when row selection changes."""
         self._update_action_button_states()
+        sel = self.table.selection() if hasattr(self, "table") else ()
+        if sel and sel[0] in self.item_to_rec_idx:
+            idx = self.item_to_rec_idx[sel[0]]
+            if 0 <= idx < len(self.records):
+                self._last_hovered_rec_idx = idx
+                self._update_preview_card(self.records[idx])
+
+    def _on_tree_click_select(self, tree: ttk.Treeview, idx_map: dict[str, int], event: tk.Event) -> None:
+        """Show image preview on single click even if the row was already selected."""
+        row = tree.identify_row(event.y)
+        if row and row in idx_map:
+            idx = idx_map[row]
+            if 0 <= idx < len(self.records):
+                self._last_hovered_rec_idx = idx
+                self._update_preview_card(self.records[idx])
+
+    def _on_main_table_motion(self, event: tk.Event) -> None:
+        pass
 
     def _update_action_button_states(self) -> None:
-        """Dynamically enable or disable contextual deletion buttons based on current selection."""
+        """Dynamically enable or disable contextual action and deletion buttons based on current state."""
         sel_items = self.table.selection() if hasattr(self, "table") else ()
         sel_count = len(sel_items)
 
@@ -2126,11 +2308,42 @@ class CCCDScannerApp:
                 self.btn_delete_selected.config(text=f"🗑 Xóa {sel_count} dòng")
                 self.btn_delete_selected.state(["!disabled"])
 
+        fn_count = sum(
+            1
+            for r in self.records
+            if r.get("_is_error", False)
+            and not r.get("_is_moved_to_error_folder", False)
+        )
+
         if hasattr(self, "btn_delete_failed"):
-            if self.error_count > 0:
+            if fn_count > 0 and not self.is_scanning:
                 self.btn_delete_failed.state(["!disabled"])
             else:
                 self.btn_delete_failed.state(["disabled"])
+
+        if hasattr(self, "btn_move_toggle"):
+            if self.has_moved_failed_images:
+                self.btn_move_toggle.config(
+                    text="↩ Hoàn tác gom ảnh",
+                    style="SmallDanger.TButton",
+                )
+                if not self.is_scanning:
+                    self.btn_move_toggle.state(["!disabled"])
+                else:
+                    self.btn_move_toggle.state(["disabled"])
+            else:
+                self.btn_move_toggle.config(
+                    text="📁 Gom ảnh lỗi vào 1 thư mục",
+                    style="Primary.TButton",
+                )
+                if fn_count > 0 and not self.is_scanning:
+                    self.btn_move_toggle.state(["!disabled"])
+                else:
+                    self.btn_move_toggle.state(["disabled"])
+
+    def _update_action_buttons_state(self) -> None:
+        """Alias for _update_action_button_states."""
+        self._update_action_button_states()
 
     def _update_status_bar(self) -> None:
         t = THEMES[self.current_theme]
@@ -2221,6 +2434,29 @@ class CCCDScannerApp:
             self.btn_move_toggle.state(["disabled"])
         if hasattr(self, "lbl_move_status"):
             self.lbl_move_status.config(text="")
+
+        if hasattr(self, "tree_passed"):
+            for item in self.tree_passed.get_children():
+                try:
+                    self.tree_passed.delete(item)
+                except Exception:
+                    pass
+        if hasattr(self, "tree_failed"):
+            for item in self.tree_failed.get_children():
+                try:
+                    self.tree_failed.delete(item)
+                except Exception:
+                    pass
+        if hasattr(self, "passed_item_to_rec_idx"):
+            self.passed_item_to_rec_idx.clear()
+        if hasattr(self, "failed_item_to_rec_idx"):
+            self.failed_item_to_rec_idx.clear()
+
+        make_preview.cache_clear()
+        gc.collect()
+
+        self._update_preview_card(None)
+        self._last_hovered_rec_idx = None
 
         if self.is_split_mode:
             self._refresh_split_views()
@@ -2315,7 +2551,7 @@ class CCCDScannerApp:
                 "Bạn có muốn mở file Excel vừa tạo ngay bây giờ không?",
             )
             if open_now:
-                os.startfile(resolved_path)
+                open_path(resolved_path)
         except Exception as e:
             messagebox.showerror(
                 "Lỗi khi lưu file",
@@ -2352,7 +2588,7 @@ class CCCDScannerApp:
                 "Bạn có muốn mở file Excel vừa cập nhật ngay bây giờ không?",
             )
             if open_now:
-                os.startfile(resolved_path)
+                open_path(resolved_path)
         except ValueError as ve:
             # Column count mismatch - halts appending and explains why
             messagebox.showerror("Không thể ghi tiếp", str(ve))
@@ -2372,21 +2608,36 @@ class CCCDScannerApp:
         if self.is_split_mode:
             self.table_container.pack_forget()
             self.split_container.pack(fill=tk.BOTH, expand=True)
-            self.btn_split_toggle.config(text="📋 Gộp lại danh sách chính")
-            if hasattr(self, "btn_split_sub"):
-                self.btn_split_sub.config(text="📋 Gộp lại danh sách chính")
+
+            cfg: dict[str, Any] = {
+                "text": "📋 Gộp lại danh sách chính",
+                "image": "",
+                "compound": "none",
+            }
+            self.btn_split_toggle.config(**cfg)
+            if hasattr(self, "btn_split_sub") and self.btn_split_sub is not self.btn_split_toggle:
+                self.btn_split_sub.config(**cfg)
             self._refresh_split_views()
         else:
             self.split_container.pack_forget()
             self.table_container.pack(fill=tk.BOTH, expand=True)
-            self.btn_split_toggle.config(text="⚡ Tách danh sách lỗi")
-            if hasattr(self, "btn_split_sub"):
-                self.btn_split_sub.config(text="⚡ Tách danh sách lỗi")
+
+            cfg = {"text": " Tách danh sách lỗi"}
+            if getattr(self, "_icon_split_img", None) is not None:
+                cfg["image"] = self._icon_split_img
+                cfg["compound"] = "left"
+            else:
+                cfg["text"] = "⚡ Tách danh sách lỗi"
+                cfg["image"] = ""
+                cfg["compound"] = "none"
+            self.btn_split_toggle.config(**cfg)
+            if hasattr(self, "btn_split_sub") and self.btn_split_sub is not self.btn_split_toggle:
+                self.btn_split_sub.config(**cfg)
             self._refresh_preview_table_data()
         self._check_empty_state()
 
     def _refresh_split_views(self) -> None:
-        """Populate both Passed and Failed tables from self.records."""
+        """Populate both Passed and Failed tables from self.records with user active columns."""
         if not hasattr(self, "tree_passed") or not hasattr(self, "tree_failed"):
             return
 
@@ -2399,6 +2650,7 @@ class CCCDScannerApp:
         self.passed_item_to_rec_idx.clear()
         self.failed_item_to_rec_idx.clear()
 
+        active = self._get_active_columns()
         pn = 0
         fn = 0
         for rec_idx, rec in enumerate(self.records):
@@ -2410,32 +2662,24 @@ class CCCDScannerApp:
                     continue
                 fn += 1
                 num_str = f"{fn:03d}"
-                fname = rec.get("source_file", "")
-                name_val = rec.get("full_name", "") or "(chưa nhập tên)"
-                status_val = rec.get("status", "")
-
+                values = [num_str] + [self._get_display_value(rec, c["key"], active) for c in active]
                 parity_tag = "even_row" if fn % 2 == 0 else "odd_row"
                 item_id = self.tree_failed.insert(
                     "",
                     tk.END,
-                    values=(num_str, fname, name_val, status_val),
+                    values=values,
                     tags=("error_row", parity_tag),
                 )
                 self.failed_item_to_rec_idx[item_id] = rec_idx
             elif not is_pending:
                 pn += 1
                 num_str = f"{pn:03d}"
-                fname = rec.get("source_file", "")
-                name_val = rec.get("full_name", "")
-                cccd_val = rec.get("cccd_number", "")
-                dob_val = rec.get("dob", "")
-                status_val = rec.get("status", "")
-
+                values = [num_str] + [self._get_display_value(rec, c["key"], active) for c in active]
                 parity_tag = "even_row" if pn % 2 == 0 else "odd_row"
                 item_id = self.tree_passed.insert(
                     "",
                     tk.END,
-                    values=(num_str, fname, name_val, cccd_val, dob_val, status_val),
+                    values=values,
                     tags=("success_row", parity_tag),
                 )
                 self.passed_item_to_rec_idx[item_id] = rec_idx
@@ -2447,12 +2691,12 @@ class CCCDScannerApp:
                 self.lbl_failed_empty.place_forget()
 
         if hasattr(self, "lbl_passed_title"):
-            self.lbl_passed_title.config(text=f"✅ Danh sách Đạt ({pn} thẻ thành công)")
+            self.lbl_passed_title.config(text=f"Danh sách quét thành công - {pn} ảnh")
         if hasattr(self, "lbl_failed_title"):
             if self.has_moved_failed_images and fn == 0:
-                self.lbl_failed_title.config(text="❌ Danh sách Cần chụp lại (Đã gom vào thư mục 'Ảnh lỗi')")
+                self.lbl_failed_title.config(text="Danh sách quét thất bại - 0 ảnh (Đã gom vào thư mục 'Ảnh lỗi')")
             else:
-                self.lbl_failed_title.config(text=f"❌ Danh sách Cần chụp lại ({fn} ảnh lỗi)")
+                self.lbl_failed_title.config(text=f"Danh sách quét thất bại - {fn} ảnh")
 
         if hasattr(self, "btn_move_toggle"):
             if self.has_moved_failed_images:
@@ -2471,8 +2715,134 @@ class CCCDScannerApp:
                 else:
                     self.btn_move_toggle.state(["disabled"])
 
+    # =========================================================================
+    # Embedded Image Preview Card (Split Mode)
+    # =========================================================================
+    def _on_passed_tree_motion(self, event: tk.Event) -> None:
+        pass
+
+    def _on_failed_tree_motion(self, event: tk.Event) -> None:
+        pass
+
+    def _on_split_tree_select(self, tree: ttk.Treeview, idx_map: dict[str, int]) -> None:
+        if not self.is_split_mode:
+            return
+        sel = tree.selection()
+        if sel and sel[0] in idx_map:
+            idx = idx_map[sel[0]]
+            if 0 <= idx < len(self.records):
+                self._last_hovered_rec_idx = idx
+                self._update_preview_card(self.records[idx])
+
+    def _on_preview_card_resize(self, event: tk.Event) -> None:
+        rec = getattr(self, "_current_preview_rec", None)
+        if rec is None:
+            return
+        if getattr(self, "_resize_preview_job", None) is not None:
+            try:
+                self.root.after_cancel(self._resize_preview_job)
+            except Exception:
+                pass
+            self._resize_preview_job = None
+        self._resize_preview_job = self.root.after(50, lambda: self._update_preview_card(rec))
+
+    def _on_preview_card_click(self, event: Any = None) -> None:
+        rec = getattr(self, "_current_preview_rec", None)
+        if rec:
+            p = rec.get("_full_path", "")
+            if p and os.path.isfile(p):
+                try:
+                    open_path(p)
+                except Exception as e:
+                    messagebox.showerror("Lỗi mở ảnh", f"Không mở được tệp ảnh:\n{e}")
+            else:
+                messagebox.showwarning(
+                    "Không tìm thấy ảnh",
+                    f"Tệp ảnh không tồn tại trên đĩa:\n{p or rec.get('source_file', '')}",
+                )
+
+    def _update_preview_card(self, rec: dict[str, Any] | None) -> None:
+        """Render card photo inside the embedded preview panel in the left sidebar."""
+        self._current_preview_rec = rec
+        if not hasattr(self, "lbl_card_img") or not hasattr(self, "preview_card"):
+            return
+
+        t = THEMES[self.current_theme]
+
+        if not rec:
+            if hasattr(self, "lbl_card_title"):
+                self.lbl_card_title.config(text="📷 Chưa chọn ảnh", fg=t["text_muted"])
+            if hasattr(self, "lbl_card_img"):
+                self.lbl_card_img.config(
+                    image="",
+                    text="Rê chuột hoặc chọn dòng ảnh\ntrong danh sách kết quả\nđể xem lại ảnh thẻ tại đây",
+                    fg=t["text_muted"],
+                )
+            self._current_card_photo = None
+            return
+
+        path = rec.get("_full_path", "")
+        filename = rec.get("source_file", Path(path).name if path else "")
+        is_err = rec.get("_is_error", False)
+
+        status_tag = "✖ Cần chụp lại" if is_err else "✔ Thành công"
+        status_fg = t["err_fg"] if is_err else t["success_fg"]
+
+        # Smart filename truncation (preserves extension)
+        p_obj = Path(path) if path else (Path(filename) if filename else None)
+        ext = p_obj.suffix if p_obj else ""
+        stem = p_obj.stem if p_obj else filename
+
+        if len(filename) <= 24:
+            disp_filename = filename
+        else:
+            avail = 24 - len(ext) - 3
+            if avail >= 6:
+                half = avail // 2
+                disp_filename = f"{stem[:avail - half]}...{stem[-half:]}{ext}"
+            else:
+                disp_filename = filename[:21] + "..."
+
+        if hasattr(self, "lbl_card_title"):
+            self.lbl_card_title.config(text=f"📷 {disp_filename} ({status_tag})", fg=status_fg)
+
+        if not path or not os.path.isfile(path):
+            if hasattr(self, "lbl_card_title"):
+                self.lbl_card_title.config(text=f"📷 {disp_filename} (Không tìm thấy)", fg=t["err_fg"])
+            if hasattr(self, "lbl_card_img"):
+                self.lbl_card_img.config(
+                    image="",
+                    text=f"⚠️ Không tìm thấy file ảnh:\n{disp_filename}\n(File có thể đã bị di chuyển hoặc xóa)",
+                    fg=t["err_fg"],
+                )
+            self._current_card_photo = None
+            return
+
+        # Determine dimensions inside container
+        self.preview_card.update_idletasks()
+        container_w = self.card_img_frame.winfo_width()
+        container_h = self.card_img_frame.winfo_height()
+
+        # In headless tests or initial render, winfo_width may be 1; provide safe minimum dimensions
+        target_w = max(100, container_w - 6)
+        target_h = max(80, container_h - 6)
+
+        try:
+            base_img = make_preview(path, max_side=650)
+            img_thumb = base_img.copy()
+            img_thumb.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
+            self._current_card_photo = ImageTk.PhotoImage(img_thumb)
+            self.lbl_card_img.config(image=self._current_card_photo, text="")
+        except Exception:
+            self.lbl_card_img.config(
+                image="",
+                text="(Không thể mở ảnh thu nhỏ)",
+                fg=t["text_muted"],
+            )
+            self._current_card_photo = None
+
     def _on_split_failed_double_click(self, event: tk.Event) -> None:
-        """Handle double clicks on the Failed list: column #3 edits Name, other columns open the full image."""
+        """Handle double clicks on the Failed list: view full name / edit cell; open full image on status or #."""
         self._destroy_inline_entry()
 
         item_id = self.tree_failed.identify_row(event.y)
@@ -2485,62 +2855,35 @@ class CCCDScannerApp:
             return
 
         rec = self.records[rec_idx]
+        col_index = int(col_id.replace("#", "")) - 1
 
-        # Column "#3" is "full_name" (Họ và tên)
-        if col_id == "#3":
-            bbox = self.tree_failed.bbox(item_id, col_id)
-            if not bbox:
-                return
-            x, y, width, height = bbox
-            current_val = rec.get("full_name", "")
+        active_cols = self._get_active_columns()
+        active_idx = col_index - 1 if col_index > 0 else -1
+        key = active_cols[active_idx]["key"] if 0 <= active_idx < len(active_cols) else None
 
-            t = THEMES[self.current_theme]
-            entry = tk.Entry(
-                self.tree_failed,
-                font=("Segoe UI", 10),
-                bg=t["entry_bg"],
-                fg=t["entry_fg"],
-                insertbackground=t["entry_caret"],
-                relief="solid",
-                bd=1,
-                highlightcolor=t["accent_bg"],
-                highlightthickness=1,
-            )
-            entry.insert(0, current_val)
-            entry.select_range(0, tk.END)
-            entry.place(x=x, y=y, width=width, height=height)
-            entry.focus_set()
-            self.active_inline_entry = entry
+        # Double clicking '#' column (col_index 0) or 'status' column opens the full image file
+        if col_index == 0 or key == "status":
+            self._open_image_path(rec.get("_full_path", ""))
+            return
 
-            def commit_edit(e: Any = None) -> None:
-                if self.active_inline_entry is None:
-                    return
-                new_val = entry.get().strip()
-                self._destroy_inline_entry()
-                rec["full_name"] = new_val
-                current_vals = list(self.tree_failed.item(item_id, "values"))
-                current_vals[2] = new_val if new_val else "(chưa nhập tên)"
-                self.tree_failed.item(item_id, values=current_vals)
+        bbox = self.tree_failed.bbox(item_id, col_id)
+        if not bbox:
+            return
 
-            def cancel_edit(e: Any = None) -> None:
-                self._destroy_inline_entry()
+        raw_val = rec.get(key, "")
+        current_val = str(raw_val) if raw_val is not None else ""
 
-            entry.bind("<Return>", commit_edit)
-            entry.bind("<FocusOut>", commit_edit)
-            entry.bind("<Escape>", cancel_edit)
-        else:
-            # Double-click any other column opens the full image file
-            path = rec.get("_full_path", "")
-            if path and os.path.exists(path):
-                try:
-                    open_path(path)
-                except Exception as e:
-                    messagebox.showerror("Lỗi mở ảnh", f"Không mở được tệp ảnh:\n{e}")
-            else:
-                messagebox.showwarning("Thông báo", f"Không tìm thấy file ảnh gốc:\n{path}")
+        def commit_failed_edit(new_val: str) -> None:
+            rec[key] = new_val.strip()
+            current_vals = list(self.tree_failed.item(item_id, "values"))
+            current_vals[col_index] = self._get_display_value(rec, key, active_cols)
+            self.tree_failed.item(item_id, values=current_vals)
+            self._refresh_preview_table_data()
+
+        self._create_inline_entry(self.tree_failed, bbox, current_val, commit_failed_edit)
 
     def _on_split_passed_double_click(self, event: tk.Event) -> None:
-        """Handle double clicks on the Passed list: edit Name on column #3, open file on column #2."""
+        """Handle double clicks on the Passed list: view full name / edit cell; open full image on #."""
         self._destroy_inline_entry()
 
         item_id = self.tree_passed.identify_row(event.y)
@@ -2553,77 +2896,45 @@ class CCCDScannerApp:
             return
 
         rec = self.records[rec_idx]
+        col_index = int(col_id.replace("#", "")) - 1
 
-        if col_id == "#3":
-            bbox = self.tree_passed.bbox(item_id, col_id)
-            if not bbox:
-                return
-            x, y, width, height = bbox
-            current_val = rec.get("full_name", "")
+        active_cols = self._get_active_columns()
+        active_idx = col_index - 1 if col_index > 0 else -1
+        key = active_cols[active_idx]["key"] if 0 <= active_idx < len(active_cols) else None
 
-            t = THEMES[self.current_theme]
-            entry = tk.Entry(
-                self.tree_passed,
-                font=("Segoe UI", 10),
-                bg=t["entry_bg"],
-                fg=t["entry_fg"],
-                insertbackground=t["entry_caret"],
-                relief="solid",
-                bd=1,
-                highlightcolor=t["accent_bg"],
-                highlightthickness=1,
-            )
-            entry.insert(0, current_val)
-            entry.select_range(0, tk.END)
-            entry.place(x=x, y=y, width=width, height=height)
-            entry.focus_set()
-            self.active_inline_entry = entry
+        # Double clicking '#' column (col_index 0) opens the full image file if available
+        if col_index == 0:
+            self._open_image_path(rec.get("_full_path", ""))
+            return
 
-            def commit_edit(e: Any = None) -> None:
-                if self.active_inline_entry is None:
-                    return
-                new_val = entry.get().strip()
-                self._destroy_inline_entry()
-                rec["full_name"] = new_val
-                current_vals = list(self.tree_passed.item(item_id, "values"))
-                current_vals[2] = new_val
-                self.tree_passed.item(item_id, values=current_vals)
+        bbox = self.tree_passed.bbox(item_id, col_id)
+        if not bbox:
+            return
 
-            def cancel_edit(e: Any = None) -> None:
-                self._destroy_inline_entry()
+        raw_val = rec.get(key, "")
+        current_val = str(raw_val) if raw_val is not None else ""
 
-            entry.bind("<Return>", commit_edit)
-            entry.bind("<FocusOut>", commit_edit)
-            entry.bind("<Escape>", cancel_edit)
-        elif col_id == "#2":
-            path = rec.get("_full_path", "")
-            if path and os.path.exists(path):
-                try:
-                    open_path(path)
-                except Exception as e:
-                    messagebox.showerror("Lỗi mở ảnh", f"Không mở được tệp ảnh:\n{e}")
+        def commit_passed_edit(new_val: str) -> None:
+            rec[key] = new_val.strip()
+            current_vals = list(self.tree_passed.item(item_id, "values"))
+            current_vals[col_index] = self._get_display_value(rec, key, active_cols)
+            self.tree_passed.item(item_id, values=current_vals)
+            self._refresh_preview_table_data()
+
+        self._create_inline_entry(self.tree_passed, bbox, current_val, commit_passed_edit)
+
+    def _delete_selected_tree_records(self, tree: ttk.Treeview, idx_map: dict[str, int]) -> None:
+        sel = tree.selection()
+        if not sel:
+            return
+        indices = {idx_map[item_id] for item_id in sel if item_id in idx_map}
+        self._delete_records_by_indices(indices)
 
     def _on_split_failed_delete(self, event: Any = None) -> None:
-        sel = self.tree_failed.selection()
-        if not sel:
-            return
-        indices = {
-            self.failed_item_to_rec_idx[item_id]
-            for item_id in sel
-            if item_id in self.failed_item_to_rec_idx
-        }
-        self._delete_records_by_indices(indices)
+        self._delete_selected_tree_records(self.tree_failed, self.failed_item_to_rec_idx)
 
     def _on_split_passed_delete(self, event: Any = None) -> None:
-        sel = self.tree_passed.selection()
-        if not sel:
-            return
-        indices = {
-            self.passed_item_to_rec_idx[item_id]
-            for item_id in sel
-            if item_id in self.passed_item_to_rec_idx
-        }
-        self._delete_records_by_indices(indices)
+        self._delete_selected_tree_records(self.tree_passed, self.passed_item_to_rec_idx)
 
     def _on_handle_failed_images_action(self) -> None:
         """Single merged button handler: toggles between moving to 'Ảnh lỗi' and undoing."""
@@ -2696,6 +3007,7 @@ class CCCDScannerApp:
                     dest_dir,
                     folder_name="Ảnh lỗi",
                     progress=lambda i, total: move_queue.put(("progress", (i, total))),
+                    root_scan_dir=self.last_input_dir,
                 )
                 move_queue.put(("done", (dest, moved, errors)))
             except Exception as e:
@@ -2744,6 +3056,7 @@ class CCCDScannerApp:
         self._refresh_preview_table_data()
         if self.is_split_mode:
             self._refresh_split_views()
+        self._update_action_button_states()
 
         if hasattr(self, "btn_move_toggle"):
             self.btn_move_toggle.config(
@@ -2761,13 +3074,15 @@ class CCCDScannerApp:
             "Danh sách ảnh lỗi đã được làm trống. Bạn có thể bấm nút 'Hoàn tác gom ảnh' bất cứ lúc nào để khôi phục lại."
         )
         if errors:
-            msg += f"\n\n{len(errors)} tệp không thể chuyển (đang mở ở chương trình khác hoặc bị khóa)."
+            msg += f"\n\nLưu ý: Có {len(errors)} tệp không thể chuyển (đang mở ở chương trình khác hoặc bị khóa)."
 
-        messagebox.showinfo("Đã gom ảnh lỗi", msg)
-        try:
-            open_path(dest_str)
-        except Exception:
-            pass
+        msg += "\n\nBạn có muốn mở xem thư mục ảnh lỗi ngay bây giờ không?"
+        should_open = messagebox.askyesno("Đã gom ảnh lỗi", msg)
+        if should_open:
+            try:
+                open_path(dest_str)
+            except Exception:
+                pass
 
     def _on_undo_move_failed_images(self) -> None:
         """One-click instant undo: moves images out of 'Ảnh lỗi' back to original folder, removes 'Ảnh lỗi' folder."""
@@ -2785,7 +3100,7 @@ class CCCDScannerApp:
             if new_path.exists():
                 try:
                     orig_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(new_path), str(orig_path))
+                    replace_or_move(new_path, orig_path)
                     restored_count += 1
                 except OSError as e:
                     errors.append((new_p, str(e)))
@@ -2829,6 +3144,7 @@ class CCCDScannerApp:
         self._refresh_preview_table_data()
         if self.is_split_mode:
             self._refresh_split_views()
+        self._update_action_button_states()
 
         # 5. Switch button back to State 1
         if hasattr(self, "btn_move_toggle"):

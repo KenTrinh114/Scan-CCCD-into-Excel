@@ -25,9 +25,13 @@ echo [3/4] Building Standalone Folder (--onedir) via PyInstaller...
 echo ============================================================
 call .\.venv\Scripts\pyinstaller.exe --noconfirm --onedir --windowed ^
     --name "CCCDScanner" ^
+    --icon "assets\app_icon.ico" ^
     --workpath "F:\Codes\CCCD for Nger\build" ^
     --distpath "F:\Codes\CCCD for Nger\dist" ^
     --add-data "assets\wechat_models;assets\wechat_models" ^
+    --add-data "assets\app_icon.ico;assets" ^
+    --add-data "assets\app_icon.png;assets" ^
+    --add-data "assets\icon_split.png;assets" ^
     --exclude-module matplotlib ^
     --exclude-module scipy ^
     --exclude-module pandas ^

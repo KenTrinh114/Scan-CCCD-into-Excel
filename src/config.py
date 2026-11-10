@@ -43,24 +43,24 @@ PROVINCE_CODES: dict[str, str] = {
 }
 
 
-def get_config_file_path() -> Path:
-    """Return the path to column_config.json in %LOCALAPPDATA%\\CCCDScanner."""
+def get_app_config_dir() -> Path:
+    """Return the base config directory in %LOCALAPPDATA%\\CCCDScanner, creating it if needed."""
     local_app_data = os.environ.get("LOCALAPPDATA")
     if not local_app_data:
         local_app_data = str(Path.home() / "AppData" / "Local")
     config_dir = Path(local_app_data) / "CCCDScanner"
     config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir / "column_config.json"
+    return config_dir
+
+
+def get_config_file_path() -> Path:
+    """Return the path to column_config.json in %LOCALAPPDATA%\\CCCDScanner."""
+    return get_app_config_dir() / "column_config.json"
 
 
 def get_theme_file_path() -> Path:
     """Return the path to theme_config.json in %LOCALAPPDATA%\\CCCDScanner."""
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if not local_app_data:
-        local_app_data = str(Path.home() / "AppData" / "Local")
-    config_dir = Path(local_app_data) / "CCCDScanner"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir / "theme_config.json"
+    return get_app_config_dir() / "theme_config.json"
 
 
 def load_theme_config() -> str:

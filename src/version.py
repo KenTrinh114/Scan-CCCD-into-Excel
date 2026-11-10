@@ -1,5 +1,5 @@
-"""Application version metadata updated automatically on build/deploy."""
+"""Application version metadata."""
 
-__version__ = "2026.11.10.0054"
-BUILD_TIME = "2026-11-10 00:54"
+__version__ = "2.2.0"
+BUILD_TIME = ""
 APP_VERSION = __version__

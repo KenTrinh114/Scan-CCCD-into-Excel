@@ -2,13 +2,30 @@
 
 import os
 import sys
+import threading
 from pathlib import Path
 import cv2
 import numpy as np
 import zxingcpp
 
+from src.failed_handler import load_heif_image, to_long_path
+
 # 3x3 sharpening kernel
 SHARPEN_KERNEL = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+
+_thread_local = threading.local()
+
+
+def _downscale_if_large(img: np.ndarray, max_side: int = 1600) -> np.ndarray:
+    """Downscale oversized images if maximum dimension exceeds max_side."""
+    h, w = img.shape[:2]
+    max_dim = max(h, w)
+    if max_dim > max_side:
+        scale = max_side / float(max_dim)
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
+        return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return img
 
 
 def get_asset_path(relative_path: str | Path) -> Path:
@@ -19,6 +36,38 @@ def get_asset_path(relative_path: str | Path) -> Path:
         # Parent of src/ is the project root
         base_dir = Path(__file__).resolve().parent.parent
     return base_dir / relative_path
+
+
+def get_thread_wechat_detector() -> cv2.wechat_qrcode_WeChatQRCode | None:
+    """
+    Worker-level singleton: instantiates WeChatQRCode once per thread using thread-local storage.
+    Ensures safe concurrent execution without cross-thread C++ state races, while avoiding
+    redundant model file loads from disk.
+    """
+    if not hasattr(_thread_local, "detector"):
+        try:
+            models_dir = get_asset_path(Path("assets") / "wechat_models")
+            detect_proto = str(models_dir / "detect.prototxt")
+            detect_model = str(models_dir / "detect.caffemodel")
+            sr_proto = str(models_dir / "sr.prototxt")
+            sr_model = str(models_dir / "sr.caffemodel")
+
+            if (
+                os.path.isfile(detect_proto)
+                and os.path.isfile(detect_model)
+                and os.path.isfile(sr_proto)
+                and os.path.isfile(sr_model)
+            ):
+                _thread_local.detector = cv2.wechat_qrcode_WeChatQRCode(
+                    detect_proto, detect_model, sr_proto, sr_model
+                )
+            else:
+                _thread_local.detector = None
+        except Exception as e:
+            # Degrade gracefully to zxingcpp
+            print(f"Notice: WeChatQRCode model initialization failed, using zxing-cpp fallback. ({e})")
+            _thread_local.detector = None
+    return _thread_local.detector
 
 
 class CCCDQRScanner:
@@ -32,77 +81,48 @@ class CCCDQRScanner:
         cv2.setNumThreads(1)
 
         self.clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-        self._wechat_detector = None
-        self._wechat_loaded = False
+        self._last_path: Path | None = None
+        self._last_gray: np.ndarray | None = None
 
     @property
-    def wechat_detector(self):
-        """Lazy-load WeChatQRCode Caffe models on first access (deferred from __init__)."""
-        if not self._wechat_loaded:
-            self._wechat_loaded = True
-            try:
-                models_dir = get_asset_path(Path("assets") / "wechat_models")
-                detect_proto = str(models_dir / "detect.prototxt")
-                detect_model = str(models_dir / "detect.caffemodel")
-                sr_proto = str(models_dir / "sr.prototxt")
-                sr_model = str(models_dir / "sr.caffemodel")
-
-                if (
-                    os.path.isfile(detect_proto)
-                    and os.path.isfile(detect_model)
-                    and os.path.isfile(sr_proto)
-                    and os.path.isfile(sr_model)
-                ):
-                    self._wechat_detector = cv2.wechat_qrcode_WeChatQRCode(
-                        detect_proto, detect_model, sr_proto, sr_model
-                    )
-            except Exception as e:
-                # Degrade gracefully to zxingcpp
-                print(f"Notice: WeChatQRCode model initialization failed, using zxing-cpp fallback. ({e})")
-                self._wechat_detector = None
-        return self._wechat_detector
+    def wechat_detector(self) -> cv2.wechat_qrcode_WeChatQRCode | None:
+        """Worker thread-local WeChatQRCode detector."""
+        return get_thread_wechat_detector()
 
     def _load_grayscale(self, file_path: Path) -> np.ndarray | None:
         """
         Safely load an image as grayscale. Supports JPG, PNG, WEBP, BMP, and Apple HEIC/HEIF.
         Uses numpy fromfile to prevent breakage on Windows paths with Vietnamese diacritics.
+        Uses libjpeg reduced decoding for huge files to save 75% memory bandwidth and CPU time.
         Downscales oversized images if > 1600px.
         """
         try:
             suffix = file_path.suffix.lower()
             if suffix in {".heic", ".heif"}:
-                try:
-                    import pillow_heif
-                    from PIL import Image
-
-                    heif_file = pillow_heif.open_heif(str(file_path))
-                    image = Image.frombytes(
-                        heif_file.mode,
-                        heif_file.size,
-                        heif_file.data,
-                        "raw",
-                    )
-                    gray = np.array(image.convert("L"))
-                except Exception:
-                    gray = None
+                image = load_heif_image(file_path)
+                gray = np.array(image.convert("L")) if image is not None else None
             else:
-                raw_bytes = np.fromfile(str(file_path), dtype=np.uint8)
+                raw_bytes = np.fromfile(to_long_path(file_path), dtype=np.uint8)
                 if raw_bytes.size == 0:
                     return None
-                gray = cv2.imdecode(raw_bytes, cv2.IMREAD_GRAYSCALE)
+
+                gray = None
+                # Huge file optimization: use libjpeg-turbo reduced decoding directly from DCT coefficients
+                if raw_bytes.size > 2_000_000 and hasattr(cv2, "IMREAD_REDUCED_GRAYSCALE_2"):
+                    try:
+                        gray_reduced = cv2.imdecode(raw_bytes, cv2.IMREAD_REDUCED_GRAYSCALE_2)
+                        if gray_reduced is not None and max(gray_reduced.shape[:2]) >= 1200:
+                            gray = gray_reduced
+                    except Exception:
+                        gray = None
+
+                if gray is None:
+                    gray = cv2.imdecode(raw_bytes, cv2.IMREAD_GRAYSCALE)
 
             if gray is None:
                 return None
 
-            h, w = gray.shape[:2]
-            max_dim = max(h, w)
-            if max_dim > 1600:
-                scale = 1600.0 / float(max_dim)
-                new_w = max(1, int(round(w * scale)))
-                new_h = max(1, int(round(h * scale)))
-                gray = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-            return gray
+            return _downscale_if_large(gray, 1600)
         except Exception:
             return None
 
@@ -115,40 +135,33 @@ class CCCDQRScanner:
         try:
             suffix = file_path.suffix.lower()
             if suffix in {".heic", ".heif"}:
-                try:
-                    import pillow_heif
-                    from PIL import Image
-
-                    heif_file = pillow_heif.open_heif(str(file_path))
-                    image = Image.frombytes(
-                        heif_file.mode,
-                        heif_file.size,
-                        heif_file.data,
-                        "raw",
-                    )
+                image = load_heif_image(file_path)
+                if image is not None:
                     rgb = np.array(image.convert("RGB"))
                     bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                except Exception:
+                else:
                     bgr = None
             else:
-                raw_bytes = np.fromfile(str(file_path), dtype=np.uint8)
+                raw_bytes = np.fromfile(to_long_path(file_path), dtype=np.uint8)
                 if raw_bytes.size == 0:
                     return None
-                bgr = cv2.imdecode(raw_bytes, cv2.IMREAD_COLOR)
+
+                bgr = None
+                if raw_bytes.size > 2_000_000 and hasattr(cv2, "IMREAD_REDUCED_COLOR_2"):
+                    try:
+                        bgr_reduced = cv2.imdecode(raw_bytes, cv2.IMREAD_REDUCED_COLOR_2)
+                        if bgr_reduced is not None and max(bgr_reduced.shape[:2]) >= 1200:
+                            bgr = bgr_reduced
+                    except Exception:
+                        bgr = None
+
+                if bgr is None:
+                    bgr = cv2.imdecode(raw_bytes, cv2.IMREAD_COLOR)
 
             if bgr is None:
                 return None
 
-            bh, bw = bgr.shape[:2]
-            max_dim = max(bh, bw)
-            if max_dim > 1600:
-                s = 1600.0 / float(max_dim)
-                bgr = cv2.resize(
-                    bgr,
-                    (max(1, int(round(bw * s))), max(1, int(round(bh * s)))),
-                    interpolation=cv2.INTER_AREA,
-                )
-            return bgr
+            return _downscale_if_large(bgr, 1600)
         except Exception:
             return None
 
@@ -169,10 +182,11 @@ class CCCDQRScanner:
 
     def _try_wechat_only(self, image: np.ndarray, check_fn) -> str | None:
         """Helper to safely run WeChatQRCode on a preprocessed candidate crop."""
-        if self.wechat_detector is None or image is None or image.size == 0:
+        detector = self.wechat_detector
+        if detector is None or image is None or image.size == 0:
             return None
         try:
-            texts, _ = self.wechat_detector.detectAndDecode(image)
+            texts, _ = detector.detectAndDecode(image)
             return check_fn(texts)
         except Exception:
             return None
@@ -201,6 +215,7 @@ class CCCDQRScanner:
         """
         Stage 1 Fast Pass (~2ms):
         Quickly scans the image using native C++ zxing-cpp.
+        Caches the decoded grayscale image in-memory for immediate Stage 2 reuse without re-reading disk.
         Returns:
             (qr_text, "OK") if decoded successfully immediately.
             (None, "UNREADABLE") if the file is corrupted/missing.
@@ -208,7 +223,13 @@ class CCCDQRScanner:
         """
         gray = self._load_grayscale(file_path)
         if gray is None:
+            self._last_path = None
+            self._last_gray = None
             return None, "UNREADABLE"
+
+        # Cache decoded grayscale array for Stage 2 reuse without redundant disk I/O
+        self._last_path = file_path
+        self._last_gray = gray
 
         try:
             results = zxingcpp.read_barcodes(
@@ -231,10 +252,22 @@ class CCCDQRScanner:
         """
         Stage 2 Deep Rescue Passes (Passes 2 through 5):
         Deep neural network and advanced image filters for cards that didn't pass Stage 1.
+        Reuses cached gray array if available to avoid redundant disk reading and decoding.
         Returns (decoded_text, scan_note).
         """
+        try:
+            return self._scan_rescue_impl(file_path, gray)
+        finally:
+            self._last_gray = None
+            self._last_path = None
+
+    def _scan_rescue_impl(self, file_path: Path, gray: np.ndarray | None = None) -> tuple[str | None, str]:
         if gray is None:
-            gray = self._load_grayscale(file_path)
+            if self._last_gray is not None and self._last_path == file_path:
+                gray = self._last_gray
+            else:
+                gray = self._load_grayscale(file_path)
+
         if gray is None:
             return None, "UNREADABLE"
 
@@ -255,9 +288,10 @@ class CCCDQRScanner:
         # -------------------------------------------------------------
         # Pass 2: WeChat Super-Resolution C++ on full frame
         # -------------------------------------------------------------
-        if self.wechat_detector is not None:
+        detector = self.wechat_detector
+        if detector is not None:
             try:
-                texts, _ = self.wechat_detector.detectAndDecode(gray)
+                texts, _ = detector.detectAndDecode(gray)
                 candidate = check_candidates(texts)
                 if candidate:
                     return candidate, "OK"
